@@ -1,0 +1,58 @@
+num_epochs: 50
+model_name: swin3d_s
+use_amp: true
+model_path: null
+data_filename: /volume/Oread/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_new_small_mu.csv
+root: "."
+target_label: Value
+datapoint_loc_label: FileName
+label_loc_label: Outcome
+binary_threshold: 40.00
+frames: 32
+device: null
+period: 2
+pretrained: false
+output: null
+n_train_patients: null
+seed: 0
+optimizer: RAdam
+weight_decay: 0.0001
+num_workers: 8
+batch_size: 5
+lr: 0.0001
+label_smoothing: null
+label_smoothing_value: null
+class_weights: null
+loss: l1_loss
+task: regression
+num_classes: 1
+scheduler_type: plateau
+factor: 0.3
+patience: 10
+threshold: 0.01
+lr_step_period: 15
+run_test: true
+tag: 1_CathEF_UCSF_MHI_2021_Retrain_15_fps_ddp
+project: 1_CathEF_UCSF_MHI_2021_Retrain_15_fps_ddp
+entity: mhi_ai
+model_path: null
+resume: false
+rand_augment: true
+resize: 224
+apply_mask: false
+view_count: null
+save_best: loss
+metrics_control:
+  optim_thresh: g_mean
+  plot_pred_distribution: true
+  plot_metrics_moving_thresh: true
+  n_bootstrap: 100
+  q_bootstrap: 0.05
+transforms:
+  - transform: RandomAffine
+    params:
+      degrees: 30
+      translate: [0.0, 0.1]
+      scale: [0.9, 1.1]
+      shear: [0, 20]
+      fill: null

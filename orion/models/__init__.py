@@ -9,10 +9,10 @@ from stam_pytorch import STAM
 from timesformer_pytorch import TimeSformer
 
 from orion.models.config import _C
+from orion.models.feature_model import get_fmodel
 from orion.models.movinet_model import MoViNet
 from orion.models.vivit import ViViT
 from orion.models.x3d_multi import X3D_multi
-from orion.models.feature_model import get_fmodel
 
 
 class Swish(nn.Module):
@@ -202,20 +202,21 @@ class X3D(nn.Module):
         # This only works for BINARY CLASSIFICATION or MULTICLASS, NOT REGRESSION
         # For regression the error is #RuntimeError: mat1 and mat2 shapes cannot be multiplied (12x1 and 2048x1)
         if task == "classification":
-            if n_classes == 2:
+            if n_classes <= 2:
                 self.fc2 = nn.Linear(2048, 1)
             else:
-                self.fc2 = nn.Linear(2048, n_classes)
+                self.fc2 = nn.Linear(2048, n_classes)  #
+        # else:
+        #     self.fc2 = nn.Linear(2048, 1)
 
         self.dropout = nn.Dropout(dropout)
 
-        self.softmax = nn.Softmax(dim=1)
+        # self.softmax = nn.Softmax(dim=1)
 
-        
         self.n_classes = n_classes
         if task == "regression":
             self.regress = nn.Linear(2048, 1)
-        #else:
+        # else:
         #    self.sigmoid = nn.Sigmoid()
 
         # This loop iterates through all modules in the current model.
@@ -453,9 +454,10 @@ def stam(num_classes, resize, **kwargs):
     return model
 
 
-def pytorchvideo_model(model_name, num_classes, model_type='classification'):
+def pytorchvideo_model(model_name, num_classes, model_type="classification"):
     from orion.models.pytorchvideo_models import get_pretrained_model
-    #from orion.models.pytorchvideo_models_class_to_regress import get_pretrained_model
+
+    # from orion.models.pytorchvideo_models_class_to_regress import get_pretrained_model
 
     model = get_pretrained_model(model_name, num_classes, model_type)
     return model
