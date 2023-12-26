@@ -1433,7 +1433,7 @@ def setup_run(args, config_defaults):
     return run
 
 
-if __name__ == "__main__":
+def main():
     import os
 
     import yaml
@@ -1445,35 +1445,16 @@ if __name__ == "__main__":
 
     with open(args.config_file) as file:
         config_defaults = yaml.safe_load(file)
-    # Initialize a wandb run if logging, otherwise return None
-    if args.local_rank == 0:
-        run = setup_run(args, config_defaults)
-    else:
-        run = None
-    # Create the transforms
-    transform_list = video_training_and_eval.create_transforms(config_defaults)
+    # Check if the script is running in sweep mode
+    # Initialize a WandB run if logging, otherwise return None
+    run = setup_run(args, config_defaults) if args.local_rank == 0 else None
 
-    # Run the main process
+    # Create the transforms
+    transform_list = create_transforms(config_defaults)
+
+    # Run the main training and evaluation process
     execute_run(config_defaults=config_defaults, transforms=transform_list, args=args, run=run)
 
-"""
-Computes the regression loss based on the specified model loss.
 
-Args:
-    outputs (Tensor): The predicted outputs from the model.
-    targets (Tensor): The target values.
-    model_loss (str): The type of model loss to use. Supported options are "mse", "huber", "l1_loss", and "rmse".
-
-Returns:
-    Tensor: The computed regression loss.
-
-Raises:
-    NotImplementedError: If the specified model loss is not implemented.
-
-Examples:
-    >>> outputs = torch.tensor([0.5, 0.8, 1.2])
-    >>> targets = torch.tensor([1.0, 1.5, 2.0])
-    >>> model_loss = "mse"
-    >>> compute_regression_loss(outputs, targets, model_loss)
-    tensor(0.1667)
-"""
+if __name__ == "__main__":
+    main()

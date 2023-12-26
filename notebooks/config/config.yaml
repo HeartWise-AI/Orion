@@ -1,4 +1,4 @@
-num_epochs: 1
+num_epochs: 50
 model_name: x3d
 model_path: null
 use_amp: true
@@ -17,8 +17,8 @@ n_train_patients: null
 seed: 0
 optimizer: SGD
 weight_decay: 0.0001
-num_workers: 8
-batch_size: 8
+num_workers: 10
+batch_size: 10
 lr: 0.0001
 label_smoothing: null
 label_smoothing_value: null
@@ -49,9 +49,6 @@ metrics_control:
   n_bootstrap: 100
   q_bootstrap: 0.05
 transforms:
-  - transform: RandomHorizontalFlip
-    params:
-      p: 0.3
   - transform: RandomAffine
     params:
       degrees: 30
