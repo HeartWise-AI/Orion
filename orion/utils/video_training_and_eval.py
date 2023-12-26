@@ -1433,20 +1433,60 @@ def setup_run(args, config_defaults):
     return run
 
 
+def infer_and_convert(value):
+    """
+    Attempt to convert a string value to a float, an integer, or a boolean as appropriate.
+    If all conversions fail, return the original string.
+    """
+    # Convert to boolean if applicable
+    if value.lower() in ["true", "false"]:
+        return value.lower() == "true"
+
+    # Try to convert to float first (to handle decimal values)
+    try:
+        float_val = float(value)
+        # If the float value is equivalent to an int, return it as an int (for whole numbers)
+        if float_val.is_integer():
+            return int(float_val)
+        return float_val
+    except ValueError:
+        pass
+
+    # Return the original string if all conversions fail
+    return value
+
+
+def update_config(config, additional_args):
+    for key, value in additional_args.items():
+        converted_value = infer_and_convert(value)
+        config[key] = converted_value  # Update the configuration with the converted value
+    return config
+
+
 def main():
     import os
 
     import yaml
 
-    # get args
-    args = orion.utils.arg_parser.parse_args()
+    args, additional_args = orion.utils.arg_parser.parse_args()
+    print("Arguments:", args)
+    print("Additional Arguments:", additional_args)
+
     if not os.path.exists(args.config_file):
         raise FileNotFoundError(f"Config file '{args.config_file}' not found.")
 
     with open(args.config_file) as file:
         config_defaults = yaml.safe_load(file)
+        # print("Initial config", config_defaults)
     # Check if the script is running in sweep mode
     # Initialize a WandB run if logging, otherwise return None
+
+    if additional_args is not None:
+        config_defaults = update_config(config_defaults, additional_args)
+        print("Updated config", config_defaults)
+    else:
+        print("No additional arguments")
+
     run = setup_run(args, config_defaults) if args.local_rank == 0 else None
 
     # Create the transforms

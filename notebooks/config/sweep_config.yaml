@@ -1,0 +1,32 @@
+program:
+  ../orion/utils/video_training_and_eval.py
+name: "1_CathEF_UCSF_MHI_2021_Retrain_15_fps_3"
+method: "bayes" # grid, random
+metric:
+  name: "best_val_loss"
+  goal: "minimize"
+parameters:
+  model_name:
+    values: ["x3d"]
+  lr:
+    distribution: "uniform"
+    min: 1e-5
+    max: 1e-3
+  rand_augment:
+    values: [True, False]
+  loss:
+    values: ["l1_loss"]
+  optimizer:
+    values: ["SGD", "Adam", "RAdam"]
+  patience:
+    min: 10
+    max: 20
+  factor:
+    values: [0.3, 0.5]
+  frames:
+    values: [48, 72]
+command:
+  - /volume/Orion/notebooks/config/runner.sh
+  - ${program}
+  - "config/config.yaml"
+  - ${args}
