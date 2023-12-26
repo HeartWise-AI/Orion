@@ -11,7 +11,6 @@ core.*
 exported_datasets_512_by_512/
 orion/notebooks/wandb/
 final_models/
-data*/
 *.cfg
 *.log
 *.mar

@@ -1,7 +1,8 @@
 num_epochs: 1
 model_name: x3d
 model_path: null
-data_filename: /volume/Oread/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_15_FPS_only_exclude_outliers_small_mu.csv
+use_amp: true
+data_filename: /volume/Orion/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_NAS_path_mu.csv
 root: "."
 target_label: Value
 datapoint_loc_label: FileName
@@ -17,7 +18,7 @@ seed: 0
 optimizer: SGD
 weight_decay: 0.0001
 num_workers: 8
-batch_size: 5
+batch_size: 8
 lr: 0.0001
 label_smoothing: null
 label_smoothing_value: null
