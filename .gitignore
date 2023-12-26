@@ -25,3 +25,4 @@ exported_videos_512_by_512_MHI_UCSF/
 *.idea/
 *.pt
 Denis_CathEF_PredictionInvestigation/
+pip install pre-commit
