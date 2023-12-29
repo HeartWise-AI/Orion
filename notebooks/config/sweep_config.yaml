@@ -7,26 +7,22 @@ metric:
   goal: "minimize"
 parameters:
   model_name:
-    values: ["x3d"]
+    values: ["swin3d_s"]
   lr:
     distribution: "uniform"
     min: 1e-5
     max: 1e-3
   rand_augment:
     values: [True, False]
-  loss:
-    values: ["l1_loss"]
   optimizer:
     values: ["SGD", "Adam", "RAdam"]
   patience:
-    min: 10
-    max: 20
+    min: 5
+    max: 15
   factor:
     values: [0.3, 0.5]
-  frames:
-    values: [48, 72]
 command:
   - /volume/Orion/notebooks/config/runner.sh
   - ${program}
-  - "config/config.yaml"
+  - "config/config_classification_swin3d.yaml"
   - ${args}

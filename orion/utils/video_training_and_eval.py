@@ -11,8 +11,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import torchmetrics
 import torchvision.transforms as transforms
-from sklearn import metrics, preprocessing
+from sklearn import metrics as sk_metrics
+from sklearn import preprocessing
 from sklearn.metrics import auc, confusion_matrix, roc_curve
 from sklearn.preprocessing import label_binarize
 
@@ -29,17 +31,20 @@ import orion
 from orion.datasets import Video
 from orion.models import movinet, pyvid_multiclass_x3d, stam, timesformer, vivit, x3d, x3d_multi
 from orion.models.videopairclassifier import VideoPairClassifier
-from orion.utils import arg_parser, plot, video_training_and_eval
+from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
 from orion.utils.plot import (
     bootstrap_metrics,
     bootstrap_multicalss_metrics,
     compute_multiclass_metrics,
-    generate_regression_graphics,
+    initialize_regression_metrics,
+    log_regression_metrics_to_wandb,
     metrics_from_moving_threshold,
     plot_moving_thresh_metrics,
     plot_multiclass_confusion,
     plot_multiclass_rocs,
     plot_preds_distribution,
+    plot_regression_graphics,
+    update_best_regression_metrics,
 )
 
 try:
@@ -90,15 +95,10 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         labels_map,
     ) = build_model(config, device, model_path=config.get("model_path"))
 
-    model.to(device)
-
-    ddp_model = nn.parallel.DistributedDataParallel(
-        model, device_ids=[device], output_device=device
-    )
     ## DDP works with TorchDynamo. When used with TorchDynamo, apply the DDP model wrapper before compiling the model,
     # such that torchdynamo can apply DDPOptimizer (graph-break optimizations) based on DDP bucket sizes.
     # (See TorchDynamo DDPOptimizer for more information.)
-    model = torch.compile(ddp_model)
+    model = torch.compile(model)
 
     # watch gradients only for rank 0
     if is_master:
@@ -106,12 +106,13 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     ### If PyTorch 2.0 is used, the following line is needed to load the model
 
     # Set up optimizer and scheduler
-    optimizer, scheduler = setup_optimizer_and_scheduler(model, config)
+    optimizer, scheduler = setup_optimizer_and_scheduler(model, config, epoch_resume)
 
     # If optimizer and scheduler states were loaded, apply them
     if optim_state:
         print("Resuming with the previous optimizer state")
         optimizer.load_state_dict(optim_state)
+
     if sched_state:
         print("Resuming with the previous scheduler state", sched_state)
         scheduler.load_state_dict(sched_state)
@@ -168,7 +169,18 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     if task == "regression":
         weights = None
+        metrics = {
+            "train": initialize_regression_metrics(device),
+            "val": initialize_regression_metrics(device),
+            "test": initialize_regression_metrics(device),
+        }
     elif config["task"] == "classification":
+        num_classes = 2 if config["num_classes"] <= 2 else config["num_classes"]
+        metrics = {
+            "train": initialize_classification_metrics(num_classes, device),
+            "val": initialize_classification_metrics(num_classes, device),
+            "test": initialize_classification_metrics(num_classes, device),
+        }
         class_weights = config["class_weights"]
         if config["class_weights"] is None:
             print("Not using weighted sampling and not using class weights specified in config")
@@ -186,9 +198,9 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     best_metrics = {
         "best_loss": float("inf"),
         "best_auc": -float("inf"),  # for classification
-        "best_mae": (float("inf"),),  # for regression
-        "best_rmse": (float("inf"),),  # for regression
-        "best_r2": (-float("inf"),),  # for regression
+        "best_mae": float("inf"),  # for regression
+        "best_rmse": float("inf"),  # for regression
+        "best_r2": float("inf"),  # for regression
     }
 
     print(
@@ -213,6 +225,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 device,
                 task,
                 weights,
+                metrics,
                 best_metrics,
                 epoch=epoch,
                 run=run,
@@ -246,19 +259,18 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 model,
                 split_dataloader,
                 False,
+                split,
                 optimizer,
                 device,
-                config["loss"],
                 epoch,
                 task,
-                block_size=None,
-                label_smoothing=config["label_smoothing"],
-                label_smoothing_value=config["label_smoothing_value"],
-                weights=weights,
-                view_count=config["view_count"],
-                scaler=scaler,
-                use_amp=use_amp,
-                scheduler=scheduler,
+                save_all=False,
+                weights=None,
+                scaler=None,
+                use_amp=None,
+                scheduler=None,
+                metrics=None,
+                config=config,
             )
 
             # Convert targets and predictions to numpy arrays for subsequent calculations
@@ -267,12 +279,11 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
             # Process the output according to the task type
             if task == "regression":
-                split_y = np.array(split_y)
-                split_yhat = np.array(split_yhat)
-                mae, mse, rmse, r2 = calculate_regression_metrics(split_y, split_yhat)
-                log_regression_metrics_to_wandb(
-                    split, split_loss, mae, mse, rmse, r2, do_log=do_log
-                )
+                if do_log:
+                    split_y = np.array(split_y)
+                    split_yhat = np.array(split_yhat)
+                    mae, mse, rmse, r2 = plot_regression_metrics(split_y, split_yhat)
+                    log_regression_metrics_to_wandb(split, split_loss, mae, mse, rmse, r2)
             elif task == "classification":
                 if config["num_classes"] <= 2:
                     # Binary classification
@@ -282,6 +293,9 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                         conf_mat,
                         pred_labels,
                     ) = calculate_binary_classification_metrics(split_y, split_yhat)
+
+                    print(auc_score)
+                    print(optimal_thresh)
                     log_binary_classification_metrics_to_wandb(
                         split,
                         epoch,
@@ -327,57 +341,27 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 )
                 df_predictions.to_csv(os.path.join(config["output"], f"{split}_predictions.csv"))
 
-            # Optionally log additional metrics or outputs as needed
-
-            # Apply test-time augmentation, if enabled
-            if config["test_time_augmentation"]:
-                ds_test_aug = orion.datasets.Video(
-                    split=split, **kwargs
-                )  # assuming clips=1 is used for TTA
-                test_aug_dataloader = torch.utils.data.DataLoader(
-                    ds_test_aug,
-                    batch_size=1,
-                    num_workers=config["num_workers"],
-                    shuffle=False,
-                    pin_memory=(device.type == "cuda"),
-                )
-
-                # Run evaluation with test-time augmentation
-                _, yhat_aug, _ = orion.utils.video_training_and_eval.run_epoch(
-                    model,
-                    test_aug_dataloader,
-                    False,  # Always False since we're evaluating
-                    None,  # No optimizer needed for evaluation
-                    device,
-                    config["loss"],
-                    save_all=True,
-                    block_size=100,  # Assuming a block size for augmentation
-                )
-
-                yhat_aug = [v[0] for v in yhat_aug] if isinstance(yhat_aug, list) else yhat_aug
-                # Log performance with test-time augmentation and save results
-                generate_regression_graphics(
-                    split_y,
-                    yhat_aug,
-                    split,
-                    epoch,
-                    config["binary_threshold"],
-                    output=config["output"],
-                )
-                # write full performance to file
-                with open(
-                    os.path.join(config["output"], f"{split}_tta_predictions.csv"), "w"
-                ) as g:
-                    for filename, pred in zip(ds_test_aug.fnames, yhat_aug):
-                        g.write(f"{filename},{pred:.4f}\n")
-
         # Clean up
         dist.destroy_process_group()
 
 
 def setup_config(config, transforms, is_master):
     """
-    Set up the configuration for the run.
+    Sets up the configuration settings for training or evaluation.
+
+    Args:
+        config (dict): The initial configuration settings.
+        transforms: The transforms to be applied to the data.
+        is_master: A boolean indicating if the current process is the master process.
+
+    Returns:
+        config (dict): The updated configuration settings.
+
+    Examples:
+        >>> config = {'output': None, 'debug': False, 'test_time_augmentation': False}
+        >>> transforms = [Resize(), Normalize()]
+        >>> is_master = True
+        >>> updated_config = setup_config(config, transforms, is_master)
     """
 
     config["transforms"] = transforms
@@ -429,31 +413,74 @@ def run_training_or_evaluate_orchestrator(
     device,
     task,
     weights,
+    metrics,
     best_metrics,
     epoch=None,
     run=None,
     labels_map=None,
     scaler=None,
 ):
+    """
+    Runs the training or evaluation orchestrator for a video model.
+
+    Args:
+        model: The video model to train or evaluate.
+        dataloader: The dataloader for loading video data.
+        datasets: The datasets used for training or evaluation.
+        phase (str): The phase of the process, either "train" or "val".
+        optimizer: The optimizer for model parameter updates.
+        scheduler: The scheduler for adjusting the learning rate.
+        config (dict): The configuration settings for training or evaluation.
+        device: The device to which the data and model should be moved.
+        task (str): The task type, either "regression" or "classification".
+        weights: The weights for loss function or metrics.
+        metrics (dict): A dictionary containing the metrics to compute.
+        best_metrics (dict): A dictionary containing the best metrics achieved so far.
+        epoch (int, optional): The current epoch number. Defaults to None.
+        run (object, optional): The run object for logging. Defaults to None.
+        labels_map (dict, optional): A mapping of label indices to label names. Defaults to None.
+        scaler (object, optional): The scaler for data normalization. Defaults to None.
+
+    Returns:
+        best_metric: The best metric achieved during training or evaluation.
+
+    Examples:
+        >>> model = VideoModel()
+        >>> dataloader = DataLoader(video_dataset)
+        >>> datasets = {'train': train_dataset, 'val': val_dataset}
+        >>> phase = 'train'
+        >>> optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        >>> scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+        >>> config = {'loss': 'mse', 'lr': 0.001, 'num_classes': 2}
+        >>> device = 'cuda'
+        >>> task = 'regression'
+        >>> weights = None
+        >>> metrics = {'train': {'mae': MAE(), 'mse': MSE()}, 'val': {'mae': MAE(), 'mse': MSE()}}
+        >>> best_metrics = {'best_mae': None, 'best_rmse': None, 'best_r2': None}
+        >>> epoch = 1
+        >>> run = wandb.Run()
+        >>> labels_map = {0: 'cat', 1: 'dog'}
+        >>> scaler = StandardScaler()
+        >>> best_metric = run_training_or_evaluate_orchestrator(model, dataloader, datasets, phase, optimizer, scheduler, config, device, task, weights, metrics, best_metrics, epoch, run, labels_map, scaler)
+    """
     do_log = run is not None  # Run is none if process rank is not 0
     model.train() if phase == "train" else model.eval()
     loss, predictions, targets, filenames = train_or_evaluate_epoch(
         model,
         dataloader,
-        True,
+        phase == "train",
+        phase,
         optimizer,
         device,
-        config["loss"],
         epoch,
         task,
-        block_size=config.get("block_size"),
-        label_smoothing=config.get("label_smoothing", False),
-        label_smoothing_value=config.get("label_smoothing_value", 0),
-        weights=config.get("weights"),
-        view_count=config.get("view_count"),
+        save_all=False,
+        weights=weights,
         scaler=scaler,
-        use_amp=config.get("use_amp", False),
+        use_amp=config.get("use_amp", True),
         scheduler=scheduler,
+        metrics=metrics,
+        config=config,
     )
 
     y = np.array(targets)
@@ -470,40 +497,35 @@ def run_training_or_evaluate_orchestrator(
         if yhat.ndim == 2 and yhat.shape[1] == 1:
             yhat = yhat.ravel()  # This converts it to a 1D array
 
-        mae, mse, rmse, r2 = calculate_regression_metrics(y, yhat)
-        log_regression_metrics_to_wandb(
-            phase, loss, mae, mse, rmse, r2, learning_rate, do_log=do_log
-        )
-
-        if do_log:
-            generate_regression_graphics(
-                y, yhat, phase, epoch, config["binary_threshold"], config
-            )
-
+        # Example: Update metrics after each batch (within your training loop)
+        # preds and target should be PyTorch tensors
+        # preds = model(inputs)  # Model predictions
+        # target = ...  # Ground truth labels
+        final_metrics = metrics[phase].compute()
+        print(final_metrics)
+        metrics[phase].reset()
         auc_score = 0  # Temporary placeholder
         mean_roc_auc_no_nan = 0  # Temporary placeholder
-        # Update the best metrics for regression, handle logic for your use case
-        if mae[0] < best_metrics["best_mae"][0] or best_metrics["best_mae"] is None:
-            print(best_metrics)
-            print(mae)
-            best_metrics["best_mae"] = mae
-        if rmse[0] < best_metrics["best_rmse"][0] or best_metrics["best_rmse"] is None:
-            best_metrics["best_rmse"] = rmse
-        if r2[0] > best_metrics["best_r2"][0] or best_metrics["best_r2"] is None:
-            best_metrics["best_r2"] = r2
+
+        if do_log:
+            log_regression_metrics_to_wandb(phase, final_metrics, loss, learning_rate)
+
+            plot_regression_graphics(y, yhat, phase, epoch, config["binary_threshold"], config)
+
+            best_metrics = update_best_regression_metrics(final_metrics, best_metrics)
+
     elif task == "classification":
         if config["num_classes"] <= 2:
-            (
-                auc_score,
-                optimal_thresh,
-                conf_mat,
-                pred_labels,
-            ) = calculate_binary_classification_metrics(y, yhat)
+            final_metrics = compute_classification_metrics(metrics[phase])
+            print(final_metrics)
+            optimal_thresh = compute_optimal_threshold(y, yhat)
+            pred_labels = (yhat > optimal_thresh).astype(int)
+
             log_binary_classification_metrics_to_wandb(
                 phase,
                 epoch,
                 loss,
-                auc_score,
+                final_metrics["auc"],
                 optimal_thresh,
                 y,
                 pred_labels,
@@ -511,8 +533,8 @@ def run_training_or_evaluate_orchestrator(
                 learning_rate,
                 do_log=do_log,
             )
-            mean_roc_auc_no_nan = auc_score
-            # Update the best AUC for binary classification, handle logic for your use case
+
+            mean_roc_auc_no_nan = final_metrics["auc"]
         else:
             metrics_summary = calculate_multiclass_metrics(y, yhat, config["num_classes"])
             log_multiclass_metrics_to_wandb(
@@ -593,64 +615,115 @@ def generate_output_dir_name(config):
     return dir_name
 
 
-def calculate_regression_metrics(y_true, predictions):
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+def initialize_classification_metrics(num_classes, device):
+    """
+    Initializes and returns a collection of classification metrics based on the number of classes.
 
-    # Calculate MAE and RMSE with bootstrapped confidence intervals
-    mae, mae_5th, mae_95th = orion.utils.plot.bootstrap(
-        y_true, predictions, metrics.mean_absolute_error
-    )
-    mse, mse_5th, mse_95th = orion.utils.plot.bootstrap(
-        y_true, predictions, metrics.mean_squared_error
-    )
-    rmse = np.sqrt(mse)
-    rmse_5th = np.sqrt(mse_5th)
-    rmse_95th = np.sqrt(mse_95th)
-    # Bootstrap R^2 score
-    r2, r2_5th, r2_95th = orion.utils.plot.bootstrap(y_true, predictions, r2_score)
+    Args:
+        num_classes (int): The number of classes.
+        device: The device to which the metrics should be moved.
 
-    return (
-        (mae, mae_5th, mae_95th),
-        (mse, mse_5th, mse_95th),
-        (rmse, rmse_5th, rmse_95th),
-        (r2, r2_5th, r2_95th),
-    )
+    Returns:
+        metrics (dict): A dictionary containing the initialized classification metrics.
 
+    Examples:
+        >>> num_classes = 2
+        >>> device = 'cuda:0'
+        >>> metrics = initialize_classification_metrics(num_classes, device)"""
 
-def log_regression_metrics_to_wandb(
-    phase, loss, mae, mse, rmse, r2, learning_rate=None, do_log=False
-):
-    if do_log:
-        # Log regression metrics to WandB
-        wandb.log({f"{phase}_loss": loss})
-        wandb.log({f"{phase}_MAE": mae[0]})
-        wandb.log({f"{phase}_MSE": mse[0]})
-        wandb.log({f"{phase}_RMSE": rmse[0]})
-        wandb.log({f"{phase}_r2": r2[0]})
-        wandb.log({f"{phase}_MAE_95_CI": mae})
-        wandb.log({f"{phase}_MSE_95_CI": mse})
-        wandb.log({f"{phase}_RMSE_95_CI": rmse})
-        wandb.log({f"{phase}_r2_95_CI": r2})
-        if learning_rate is not None:
-            wandb.log({"learning_rate": learning_rate})
+    if num_classes <= 2:
+        # Binary Classification Metrics
+        metrics = {
+            "auc": torchmetrics.AUROC(task="binary").to(device),
+            "confmat": torchmetrics.ConfusionMatrix(task="binary", num_classes=2).to(device),
+        }
+    else:
+        # Multi-Class Classification Metrics
+        metrics = {
+            "auc": torchmetrics.AUROC(task="multilabel", num_classes=num_classes).to(device),
+            "auc_weighted": torchmetrics.AUROC(
+                task="multiclass", num_classes=num_classes, average="weighted"
+            ).to(device),
+            "confmat": torchmetrics.ConfusionMatrix(
+                task="multiclass", num_classes=num_classes
+            ).to(device),
+        }
+    return metrics
 
 
-def calculate_binary_classification_metrics(y_true, predictions):
-    # Calculate AUC and confusion matrixl
-    # print(y_true)
-    # print(y_true.shape)
-    # print(predictions)
-    # print(predictions.shape)
-    fpr, tpr, thresholds = metrics.roc_curve(y_true, predictions)
-    auc_score = metrics.auc(fpr, tpr)
+def update_classification_metrics(metrics, preds, target, num_classes):
+    """
+    Updates the classification metrics based on the predictions and targets.
+
+    Args:
+        metrics (dict): A dictionary containing the classification metrics to update.
+        preds (torch.Tensor): The predicted values.
+        target (torch.Tensor): The target values.
+        num_classes (int): The number of classes.
+
+    Examples:
+        >>> metrics = {'auc': AUC(), 'confmat': ConfusionMatrix()}
+        >>> preds = torch.tensor([0.8, 0.2, 0.6])
+        >>> target = torch.tensor([1, 0, 1])
+        >>> num_classes = 2
+        >>> update_classification_metrics(metrics, preds, target, num_classes)"""
+
+    if num_classes <= 2:
+        # Update for Binary Classification
+        metrics["auc"].update(preds, target.int())
+        metrics["confmat"].update((preds > 0.5).int(), target.int())
+    else:
+        # Update for Multi-Class Classification
+        # Convert predictions to label format
+        print(preds)
+        if preds.ndim > 1 and preds.shape[1] == 1:
+            pred_labels = preds.flatten()
+        print(preds)
+        target_one_hot = torch.nn.functional.one_hot(target, num_classes=num_classes)
+        metrics["auc"].update(preds, target_one_hot)
+        metrics["auc_micro"].update(preds, target_one_hot)
+        metrics["confmat"].update(preds.argmax(dim=1), target)
+
+
+def compute_classification_metrics(metrics):
+    """
+    Computes classification metrics based on the provided metrics dictionary.
+
+    Args:
+        metrics (dict): A dictionary containing the metrics to compute.
+
+    Returns:
+        computed_metrics (dict): A dictionary containing the computed classification metrics.
+
+    Examples:
+        >>> metrics = {'accuracy': Accuracy(), 'precision': Precision()}
+        >>> computed_metrics = compute_classification_metrics(metrics)
+    """
+
+    computed_metrics = {}
+    for metric_name, metric in metrics.items():
+        computed_value = metric.compute()
+
+        # Check if tensor has a single element
+        if computed_value.numel() == 1:
+            computed_metrics[metric_name] = computed_value.item()
+        else:
+            # Convert to a floating point tensor before taking the mean
+            computed_value_float = computed_value.type(torch.float32)
+            computed_metrics[metric_name] = computed_value_float.mean().item()
+
+    for metric in metrics.values():
+        metric.reset()
+
+    return computed_metrics
+
+
+def compute_optimal_threshold(y_true, y_scores):
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
     j_index = tpr - fpr
     optimal_idx = np.argmax(j_index)
     optimal_threshold = thresholds[optimal_idx]
-    # Define your optimal threshold here
-    pred_labels = (predictions > optimal_threshold).astype(int)
-
-    conf_mat = metrics.confusion_matrix(y_true, predictions > optimal_threshold)
-    return auc_score, optimal_threshold, conf_mat, pred_labels
+    return optimal_threshold
 
 
 def log_binary_classification_metrics_to_wandb(
@@ -690,36 +763,6 @@ def log_binary_classification_metrics_to_wandb(
 
         if learning_rate is not None:
             wandb.log({"learning_rate": learning_rate})
-
-
-def calculate_multiclass_metrics(y_true, predictions, num_classes):
-    # Please ensure that:
-
-    # The y_true variable is correctly provided to the function and is an array of shape either (n_samples,) or (n_samples, num_classes) for multi-label cases. If any different format is used, the structure and encoding need to be appropriately adjusted.
-    # The predictions variable is an array of shape (n_samples, num_classes), where each row contains the predicted scores for each class of a sample       # One-hot encode using original classes
-    y_true_one_hot = label_binarize(y_true, classes=list(range(num_classes)))
-    print(predictions)
-    print(predictions.shape)
-    # Compute ROC curve and ROC AUC for each class
-    fpr = dict()
-    tpr = dict()
-    roc_auc = dict()
-    for i in range(num_classes):
-        fpr[i], tpr[i], _ = roc_curve(y_true_one_hot[:, i], predictions[:, i])
-        roc_auc[i] = auc(fpr[i], tpr[i])
-
-    # Compute micro-average ROC curve and ROC AUC
-    fpr["micro"], tpr["micro"], _ = roc_curve(y_true_one_hot.ravel(), predictions.ravel())
-    roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
-
-    # Compute confusion matrix
-    y_pred = np.argmax(predictions, axis=1)
-    conf_mat = confusion_matrix(y_true, y_pred)
-
-    # Compile all metrics into a summary dictionary
-    metrics_summary = {"fpr": fpr, "tpr": tpr, "roc_auc": roc_auc, "conf_mat": conf_mat}
-
-    return metrics_summary
 
 
 def log_multiclass_metrics_to_wandb(
@@ -855,7 +898,7 @@ def update_and_save_checkpoints(
     task,
     do_log=False,
 ):
-    if do_log:
+    if do_log:  ##Only if its the main process
         """
         Save the current checkpoint. Update the best checkpoint if the current performance is better.
 
@@ -900,7 +943,7 @@ def update_and_save_checkpoints(
                 wandb.run.summary["best_loss"] = best_loss
                 torch.save(save_data, best_path)
                 wandb.log({"best_val_loss": best_loss})
-            elif task == "classification" and current_auc is not None and current_auc > best_auc:
+            elif task == "classification" and current_loss < best_loss:
                 best_loss = current_loss
                 best_auc = current_auc
                 # Log and save for classification since both loss and AUC are relevant
@@ -945,18 +988,16 @@ def should_update_best_performance(
 
 
 def build_model(config, device, model_path=None):
-    from sklearn import metrics, preprocessing
-
     """
-        Build and initialize the model based on the configuration.
+    Build and initialize the model based on the configuration.
 
-        Args:
-            config (dict): Configuration parameters for the model.
-            device (str): Device to do the training.
+    Args:
+        config (dict): Configuration parameters for the model.
+        device (str): Device to do the training.
 
-        Returns:
-            torch.nn.Module: Initialized model.
-        """
+    Returns:
+        torch.nn.Module: Initialized model.
+    """
     # Instantiate model based on configuration
     print(config["task"])
     print(config["num_classes"])
@@ -1027,17 +1068,26 @@ def build_model(config, device, model_path=None):
 
     # Loading pretrained weights if specified
     if model_path and config["resume"] == True:
-        print("Loading checkpoint")
-        checkpoint = torch.load(model_path)
-        try:
-            model.load_state_dict(checkpoint["state_dict"])
-        except:
-            # Handle mismatch in state dict keys
-            new_state_dict = OrderedDict()
-            for k, v in checkpoint["state_dict"].items():
-                name = k[10:]  # Adjust the key name as needed
-                new_state_dict[name] = v
-            model.load_state_dict(new_state_dict)
+        ##TO DO : TEST RESUMING AND MAKE SURE YOU GET THE RIGHT PREDICTIONS AND TRAINING
+        print("Loading checkpoint", model_path)
+        # configure map_location properly
+        map_location = {"cuda:%d" % 0: "cuda:%d" % device.index}
+        print("Map location", map_location)
+
+        checkpoint = torch.load(model_path, map_location=map_location)
+        # print("Model ddp", checkpoint)
+
+        model_state_dict = checkpoint["state_dict"]
+        torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+            model_state_dict, "_orig_mod.module."
+        )
+
+        model.load_state_dict(model_state_dict)
+        model.to(device)
+
+        model = nn.parallel.DistributedDataParallel(
+            model, device_ids=[device.index], output_device=device.index
+        )
 
         # Additional code to load optimizer and scheduler states, and epoch
         optimizer_state = checkpoint.get("optimizer_state_dict")
@@ -1051,8 +1101,15 @@ def build_model(config, device, model_path=None):
             not in ["model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "epoch"]
         }
 
-        return model, optimizer_state, scheduler_state, epoch, bestLoss, other_metrics, labels_map
+        ## DDP works with TorchDynamo. When used with TorchDynamo, apply the DDP model wrapper before compiling the model,
+        # such that torchdynamo can apply DDPOptimizer (graph-break optimizations) based on DDP bucket sizes.
+        # (See TorchDynamo DDPOptimizer for more information.)
 
+        return model, optimizer_state, scheduler_state, epoch, bestLoss, other_metrics, labels_map
+    model.to(device)
+    model = nn.parallel.DistributedDataParallel(
+        model, device_ids=[device.index], output_device=device.index
+    )
     return model, None, None, 0, float("inf"), {}, labels_map
 
 
@@ -1141,7 +1198,7 @@ def load_data(split, config, transforms, weighted_sampling):
     return dataloader, dataset
 
 
-def setup_optimizer_and_scheduler(model, config):
+def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
     """
     Sets up the optimizer and scheduler based on the provided configuration.
 
@@ -1203,9 +1260,8 @@ def setup_optimizer_and_scheduler(model, config):
     elif config["scheduler_type"] == "cosine_warm_restart":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optim,
-            T_0=config["restart_epoch"],
             verbose=True,
-            last_epoch=config["num_epochs"],
+            last_epoch=epoch_resume,
         )
     else:
         scheduler = None
@@ -1219,26 +1275,24 @@ def train_or_evaluate_epoch(
     model,
     dataloader,
     is_training,
+    phase,
     optimizer,
     device,
-    model_loss,
     epoch,
     task,
     save_all=False,
-    block_size=None,
-    label_smoothing=False,
-    label_smoothing_value=0,
     weights=None,
-    view_count=None,
     scaler=None,
     use_amp=None,
     scheduler=None,
+    metrics=None,
+    config=None,
 ):
     model.train(is_training)
     total_loss = 0.0
     total_items = 0
     predictions, targets, filenames = [], [], []
-
+    model_loss = config.get("loss")
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}") as pbar:
             for batch in dataloader:
@@ -1248,7 +1302,7 @@ def train_or_evaluate_epoch(
 
                 # Handle non-4D data if block_size is provided
                 if (
-                    block_size is not None and len(data.shape) == 5
+                    config.get("block_size") is not None and len(data.shape) == 5
                 ):  # assuming shape is (B, T, C, H, W)
                     # Flatten the temporal and batch dimension to make data 4D
                     batch_size, frames, channels, height, width = data.shape
@@ -1263,16 +1317,22 @@ def train_or_evaluate_epoch(
 
                     # Loss computation
                     if task == "regression":
+                        outputs = outputs.squeeze()
+                        metrics[phase].update(outputs, outcomes)
                         loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
                     elif task == "classification":
                         num_dims = outputs.dim()
-                        # print(outputs)
-                        # print("Pre squeeze", outputs.shape)
-
                         # If outputs is 2D and the last dimension is 1 (e.g., [batch_size, 1]), squeeze the last dimension
                         if num_dims == 2 and outputs.size(1) == 1:
                             outputs = outputs.squeeze(-1)
-                            # print("Post squeeze", outputs.shape)
+                        update_classification_metrics(
+                            metrics[phase], outputs, outcomes, config["num_classes"]
+                        )
+
+                        # print(outputs)
+                        # print("Pre squeeze", outputs.shape)
+
+                        # print("Post squeeze", outputs.shape)
 
                         loss = compute_classification_loss(
                             outputs, outcomes, model_loss, weights
@@ -1326,7 +1386,7 @@ def compute_regression_loss(outputs, targets, model_loss):
     Args:
         outputs (Tensor): The predicted outputs from the model.
         targets (Tensor): The target values.
-        model_loss (str): The type of model loss to use. Supported options are "mse", "huber", "l1_loss", and "rmse".
+        model_loss (str): The type of model loss to use. Supported options are "mse", "huber", "l1_loss", and "rmse" for regression and "bce_loss" or "ce_loss" for classificaiton.
 
     Returns:
         Tensor: The computed regression loss.
@@ -1355,7 +1415,7 @@ def compute_regression_loss(outputs, targets, model_loss):
 
 
 def compute_classification_loss(outputs, targets, model_loss, weights):
-    if model_loss == "bce_loss":
+    if model_loss == "bce_logit_loss":
         criterion = torch.nn.BCEWithLogitsLoss(weight=weights)
     elif model_loss == "ce_loss":
         criterion = torch.nn.CrossEntropyLoss(weight=weights)

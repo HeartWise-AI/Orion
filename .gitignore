@@ -1,27 +1,34 @@
+# Ignore directories
 artifacts/
 .ipynb_checkpoints/
 __pycache__/
-*.swp
-*.pyc
 .empty/
 .vscode/
 orion/trained_models/
 data/
-core.*
-exported_datasets_512_by_512/
 orion/notebooks/wandb/
 final_models/
-*.cfg
-*.log
-*.mar
+wandb/
 DeepQCA_videos/
 CathEF-data/
 df_angle_object_rca_lca_filtered/
-test.py
-CathEF*
 wandb/
 exported_videos_512_by_512_MHI_UCSF/
-*.idea/
-*.pt
+.idea/
 Denis_CathEF_PredictionInvestigation/
-pip install pre-commit
+
+# Ignore specific file types
+*.swp
+*.pyc
+*.cfg
+*.log
+*.mar
+*.pt
+*.csv
+
+# Ignore specific files
+test.py
+CathEF*
+swin3d_s*
+x3d*
+core*

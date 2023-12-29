@@ -2,14 +2,14 @@ num_epochs: 50
 model_name: swin3d_s
 use_amp: true
 model_path: null
-data_filename: /volume/Orion/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_NAS_path_mu.csv
+data_filename: /volume/Orion/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_NAS_path_small_mu.csv
 root: "."
 target_label: Value
 datapoint_loc_label: FileName
 label_loc_label: Outcome
 binary_threshold: 40.00
 frames: 32
-device: null
+device: cuda
 period: 2
 pretrained: false
 output: null
@@ -27,8 +27,8 @@ loss: l1_loss
 task: regression
 num_classes: 1
 scheduler_type: plateau
-factor: 0.3
-patience: 10
+factor: 0.5
+patience: 5
 threshold: 0.01
 lr_step_period: 15
 run_test: true

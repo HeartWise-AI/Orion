@@ -9,9 +9,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import torch
+import torchmetrics
 import tqdm
 from sklearn import metrics
+
 import wandb
+
 
 def plot_loss(log_path):
     """
@@ -155,7 +159,7 @@ def plot_multiclass_confusion(conf_mat, save_dir=None, tag="test"):
     plt.show()
 
 
-def generate_regression_graphics(y, yhat, phase, epoch, binary_threshold, config):
+def plot_regression_graphics(y, yhat, phase, epoch, binary_threshold, config):
     import sklearn
 
     # Generate binary metrics
@@ -169,7 +173,7 @@ def generate_regression_graphics(y, yhat, phase, epoch, binary_threshold, config
     if config["metrics_control"]["plot_pred_distribution"]:
         plot_preds_distribution(y, yhat, phase=phase, epoch=epoch)
         metrics_moving_thresh = metrics_from_moving_threshold(y_cat, np.array(yhat))
-        print(metrics_moving_thresh)
+        # print(metrics_moving_thresh)
         optim_thresh = metrics_moving_thresh[metric_for_cutoff_locator].idxmax()
         print(f"Optimal cut-off threshold: {optim_thresh}, based on {metric_for_cutoff_locator}")
 
@@ -285,7 +289,6 @@ def metrics_from_binvecs(y_true_bin, y_hat_bin):
     and should not affect other parts.
     """
     with np.errstate(divide="ignore", invalid="ignore"):
-
         # sanity check, "division by zero" should exhibit the following behavior
         assert np.float64(1.0) / np.float64(0.0) == np.inf
         assert np.isnan(np.float64(0.0) / np.float64(0.0))
@@ -616,7 +619,10 @@ def bootstrap_multicalss_metrics(y_true, y_hat, num_classes, nsample=1000, q=0.0
     mid_cis["n_bootstrap"] = nsample
     return mid_cis
 
-def display_examples_from_model(model, dataloader, device, directory="display_video000/", N_POOL=300, resize_dims=(256, 256)):
+
+def display_examples_from_model(
+    model, dataloader, device, directory="display_video000/", N_POOL=300, resize_dims=(256, 256)
+):
     """
     Display examples by saving videos and predictions to a specified directory.
 
@@ -643,7 +649,7 @@ def display_examples_from_model(model, dataloader, device, directory="display_vi
             X = X.to(device)
             targets = targets.to(device)
             outputs = model(X)  # Assuming the model returns the required outputs
-            
+
             for j in range(X.shape[0]):
                 if counter < N_POOL:
                     video_path = os.path.join(directory, f"{counter}.mp4")
@@ -658,7 +664,9 @@ def display_examples_from_model(model, dataloader, device, directory="display_vi
 
                     temp = Resize(resize_dims)(X[j]).cpu().numpy()
                     temp = (temp - temp.min()) * 255 / (temp.max() - temp.min())
-                    imageio.mimwrite(video_path, np.transpose(temp.astype(np.uint8), (1, 2, 3, 0)), fps=15)
+                    imageio.mimwrite(
+                        video_path, np.transpose(temp.astype(np.uint8), (1, 2, 3, 0)), fps=15
+                    )
 
             if counter >= N_POOL:
                 break
@@ -670,6 +678,7 @@ def display_examples_from_model(model, dataloader, device, directory="display_vi
 # Example usage
 # Assuming you have a trained model and a dataloader
 # display_examples(trained_model, your_dataloader, torch.device('cuda'))
+
 
 def display_examples(data, directory="display_video000/", N_POOL=300, resize_dims=(256, 256)):
     """
@@ -707,7 +716,9 @@ def display_examples(data, directory="display_video000/", N_POOL=300, resize_dim
 
                 temp = Resize(resize_dims)(X[j]).cpu().numpy()
                 temp = (temp - temp.min()) * 255 / (temp.max() - temp.min())
-                imageio.mimwrite(video_path, np.transpose(temp.astype(np.uint8), (1, 2, 3, 0)), fps=15)
+                imageio.mimwrite(
+                    video_path, np.transpose(temp.astype(np.uint8), (1, 2, 3, 0)), fps=15
+                )
 
             if counter >= N_POOL:
                 break
@@ -742,3 +753,69 @@ def dice_similarity_coefficient(inter, union):
         * None
     """
     return 2 * sum(inter) / (sum(union) + sum(inter))
+
+
+def initialize_regression_metrics(device):
+    metrics = torchmetrics.MetricCollection(
+        {
+            "mae": torchmetrics.MeanAbsoluteError().to(device),
+            "mse": torchmetrics.MeanSquaredError().to(device),
+            "r2_score": torchmetrics.R2Score().to(device),
+        }
+    )
+    return metrics
+
+
+def log_regression_metrics_to_wandb(phase, metrics_dict, loss, learning_rate=None):
+    # Log each metric in the metrics_dict
+    for metric_name, metric_tensor in metrics_dict.items():
+        # Convert tensor to a standard Python number (like float)
+        metric_value = metric_tensor.item() if torch.is_tensor(metric_tensor) else metric_tensor
+        print(f"{metric_name}: {metric_value}")
+        wandb.log({f"{phase}_{metric_name}": metric_value})
+
+    # Log the loss
+
+    loss_value = loss.item() if torch.is_tensor(loss) else loss
+    wandb.log({f"{phase}_loss": loss_value})
+
+    # Optionally log the learning rate
+    if learning_rate is not None:
+        lr_value = learning_rate.item() if torch.is_tensor(learning_rate) else learning_rate
+        wandb.log({"learning_rate": lr_value})
+
+
+def update_best_regression_metrics(final_metrics, best_metrics):
+    # Extract metric values, converting from tensor if necessary
+    mae = (
+        final_metrics["mae"].item()
+        if torch.is_tensor(final_metrics["mae"])
+        else final_metrics["mae"]
+    )
+    mse = (
+        final_metrics["mse"].item()
+        if torch.is_tensor(final_metrics["mse"])
+        else final_metrics["mse"]
+    )
+    r2 = (
+        final_metrics["r2_score"].item()
+        if torch.is_tensor(final_metrics["r2_score"])
+        else final_metrics["r2_score"]
+    )
+
+    mse_tensor = torch.tensor(mse) if not isinstance(mse, torch.Tensor) else mse
+    rmse = torch.sqrt(mse_tensor)
+
+    # Update MAE if it's better or if best_mae is not set
+    if best_metrics["best_mae"] is None or mae < best_metrics["best_mae"]:
+        best_metrics["best_mae"] = mae
+
+    # Update RMSE if it's better or if best_rmse is not set
+    if best_metrics["best_rmse"] is None or rmse < best_metrics["best_rmse"]:
+        best_metrics["best_rmse"] = rmse
+
+    # Update R2 Score if it's better or if best_r2 is not set
+    if best_metrics["best_r2"] is None or r2 > best_metrics["best_r2"]:
+        best_metrics["best_r2"] = r2
+
+    return best_metrics
