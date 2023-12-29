@@ -10,9 +10,11 @@ Orion is a Python-based application designed for video training and evaluation t
 3. `conda activate orion`
 4. Install Poetry, a Python package manager. You can do this by running the following commands:
 
-```python3 -m pip install --user pipx
+```
+python3 -m pip install --user pipx
 python3 -m pipx ensurepath
-pipx install poetry```
+pipx install poetry
+```
 
 Then `poetry install` 
 
