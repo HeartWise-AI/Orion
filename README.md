@@ -5,7 +5,7 @@ Orion is a Python-based application designed for video training and evaluation t
 
 
 
-1. Ensure you have Python 3.10 or later installed.
+1. Ensure you have Python 3.10 or later installed. Ensure you have an account on wandb.ai and that you logged in used `wandb login`
 2. It is recommended to use Conda and create a new environemnt as such : `conda create -n orion python=3.10 anaconda`
 3. `conda activate orion`
 4. Install Poetry, a Python package manager. You can do this by running the following commands:
@@ -26,7 +26,8 @@ You can use Orion either through a Python script or directly in a Jupyter notebo
 ### Configuration file example
 See `/config/` for different config.YAML file examples.
 
-```- num_epochs: The number of epochs for training.
+```
+- num_epochs: The number of epochs for training.
 - model_name: The name of the model to use.
 - model_path: The path to the model file. If this is set to null, a new model will be created.
 - use_amp: Whether to use automatic mixed precision for training. This can speed up training on GPUs.
@@ -70,7 +71,8 @@ See `/config/` for different config.YAML file examples.
 - view_count: The view count for the images.
 - save_best: The metric to use for saving the best model.
 - metrics_control: The metrics control parameters.
-- transforms: The transforms to apply to the image```
+- transforms: The transforms to apply to the image
+```
 
 ### Using a Python Script
 
@@ -87,34 +89,40 @@ See `/config/` for different config.YAML file examples.
 
 2. In your Jupyter notebook, import the necessary modules and set up your environment variables:
 
-```from orion.utils import video_training_and_eval
+```
+from orion.utils import video_training_and_eval
 import wandb
 import yaml
 os.environ["WANDB_NOTEBOOK_NAME"] = "test_view_classifier.ipynb"
 os.environ['RANK'] = '0'
 os.environ['WORLD_SIZE'] = '1'
 os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12355'```
+os.environ['MASTER_PORT'] = '12355'
+```
 
 
 3. Define a class for your command-line arguments:
 
-```class Args:
+```
+class Args:
     def __init__(self):
         self.local_rank = 0
         self.log_all = False
         self.epochs = 2
-        self.batch = 32```
+        self.batch = 32
+```
 
 
 4. Load your configuration from the YAML file, create the transforms, initialize a wandb run if logging, and run the main process:
 
-```args = Args()
+```
+args = Args()
 with open('config/config.yaml', 'r') as file:
     config_defaults = yaml.safe_load(file)
 transform_list = video_training_and_eval.create_transforms(config_defaults)
 run = video_training_and_eval.setup_run(args, config_defaults)
-video_training_and_eval.execute_run(config_defaults=config_defaults, transforms=transform_list, args=args, run=run)```
+video_training_and_eval.execute_run(config_defaults=config_defaults, transforms=transform_list, args=args, run=run)
+```
 
 ### Using Weights & Biases Sweeps
 
@@ -122,29 +130,35 @@ video_training_and_eval.execute_run(config_defaults=config_defaults, transforms=
 
 2. In your Jupyter notebook, import the necessary modules:
 
-```import wandb
-import yaml```
+```
+import wandb
+import yaml
+```
 
 
 
 3. Define a function to load your YAML configuration:
 
-```def load_yaml_config(file_path):
+```
+def load_yaml_config(file_path):
     with open(file_path, 'r') as file:
-        return yaml.safe_load(file)```
+        return yaml.safe_load(file)
+```
 
 
 
 4. Load your sweep configuration from the YAML file, create a sweep with wandb, and run the sweep agent:
 
-```sweep_conf_file_path = 'config/sweep_config.yaml'
+```
+sweep_conf_file_path = 'config/sweep_config.yaml'
 sweep_conf = load_yaml_config(sweep_conf_file_path)
 sweep_id = wandb.sweep(sweep_conf,project=sweep_conf['name'])
 count = 1  # number of runs to execute
 wandb.agent(
     sweep_id=sweep_id,
     count=count
-)```
+)
+```
 
 
 ### Note
