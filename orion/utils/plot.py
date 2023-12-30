@@ -760,7 +760,6 @@ def initialize_regression_metrics(device):
         {
             "mae": torchmetrics.MeanAbsoluteError().to(device),
             "mse": torchmetrics.MeanSquaredError().to(device),
-            "r2_score": torchmetrics.R2Score().to(device),
         }
     )
     return metrics
@@ -797,11 +796,6 @@ def update_best_regression_metrics(final_metrics, best_metrics):
         if torch.is_tensor(final_metrics["mse"])
         else final_metrics["mse"]
     )
-    r2 = (
-        final_metrics["r2_score"].item()
-        if torch.is_tensor(final_metrics["r2_score"])
-        else final_metrics["r2_score"]
-    )
 
     mse_tensor = torch.tensor(mse) if not isinstance(mse, torch.Tensor) else mse
     rmse = torch.sqrt(mse_tensor)
@@ -814,8 +808,4 @@ def update_best_regression_metrics(final_metrics, best_metrics):
     if best_metrics["best_rmse"] is None or rmse < best_metrics["best_rmse"]:
         best_metrics["best_rmse"] = rmse
 
-    # Update R2 Score if it's better or if best_r2 is not set
-    if best_metrics["best_r2"] is None or r2 > best_metrics["best_r2"]:
-        best_metrics["best_r2"] = r2
-
-    return best_metrics
+    return best_metrics, mae, mse, rmse

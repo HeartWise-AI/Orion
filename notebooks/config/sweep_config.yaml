@@ -1,6 +1,6 @@
 program:
   ../orion/utils/video_training_and_eval.py
-name: "1_CathEF_UCSF_MHI_2021_Retrain_15_fps_3"
+name: "1_CathEF_UCSF_MHI_2021_Retrain_15_fps_ddp"
 method: "bayes" # grid, random
 metric:
   name: "best_val_loss"
@@ -15,7 +15,10 @@ parameters:
   rand_augment:
     values: [True, False]
   optimizer:
-    values: ["SGD", "Adam", "RAdam"]
+    values: ["AdamW", "Adam", "RAdam"]
+  weight_decay:
+    min: 0.0  # explicitly a float
+    max: 0.001  # explicitly a float, equivalent to 1e-3
   patience:
     min: 5
     max: 15
@@ -24,5 +27,5 @@ parameters:
 command:
   - /volume/Orion/notebooks/config/runner.sh
   - ${program}
-  - "config/config_classification_swin3d.yaml"
+  - "config/config_regression_swin3d.yaml"
   - ${args}
