@@ -4,6 +4,7 @@ Functions for plotting results
 
 import os
 import random
+from itertools import cycle
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,6 +14,7 @@ import torch
 import torchmetrics
 import tqdm
 from sklearn import metrics
+from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 import wandb
 
@@ -531,47 +533,6 @@ def plot_moving_thresh_metrics(metrics_moving_thresh, optim_thresh=None, phase="
     ax.set_title(f"{phase} metrics moving thresh, epoch{epoch}")
 
 
-def compute_multiclass_metrics(y_true, y_hat, num_classes):
-    """
-    ---------------------------------------------------------------------------------
-    Purpose:
-        *  Compute metrics for multi-class classification performance.
-        Metrics are first computed for each individual class. The summarizing metrics
-        are class-weighted averages across the classes.
-    ---------------------------------------------------------------------------------
-    Args:
-        * y_true
-            - numpy array of shape n x c, n- number of samples, c- number of classes, one-hot-encoded
-        * y_hat
-            - numpy array of shape n x c, n- number of samples, c- number of classes, elements are probabilities
-    ---------------------------------------------------------------------------------
-    Returns:
-        * A dataframe of metrics
-    ---------------------------------------------------------------------------------
-    """
-    y_true_intlabel = np.argmax(y_true, axis=-1)
-    y_hat_intlabel = np.argmax(y_hat, axis=-1)
-
-    ytrue_yhat = pd.DataFrame(y_true_intlabel, columns=["y_true_intlabel"])
-    ytrue_yhat["y_hat_intlabel"] = y_hat_intlabel
-    #     ytrue_yhat['y_true_strlabel'] = ytrue_yhat['y_true_intlabel'].replace(labels_map)
-
-    multi_metrics_dict = {}
-    for i in range(num_classes):
-        y_true_bin = ytrue_yhat["y_true_intlabel"] == i
-        y_hat_bin = ytrue_yhat["y_hat_intlabel"] == i
-        multi_metrics_dict[i] = metrics_from_binvecs(y_true_bin, y_hat_bin)
-
-    multi_metrics_df = pd.DataFrame.from_dict(multi_metrics_dict, orient="index")
-    multi_metrics_df.index.name = "intlabel"
-    class_weights = multi_metrics_df["p"] / (multi_metrics_df["p"].sum())
-    return (
-        multi_metrics_df.drop(columns=["p", "n", "tp", "fp", "tn", "fn"])
-        .multiply(class_weights, axis="index")
-        .sum()
-    )
-
-
 def bootstrap_multicalss_metrics(y_true, y_hat, num_classes, nsample=1000, q=0.05):
     """
      ---------------------------------------------------------------------------------
@@ -770,11 +731,10 @@ def log_regression_metrics_to_wandb(phase, metrics_dict, loss, learning_rate=Non
     for metric_name, metric_tensor in metrics_dict.items():
         # Convert tensor to a standard Python number (like float)
         metric_value = metric_tensor.item() if torch.is_tensor(metric_tensor) else metric_tensor
-        print(f"{metric_name}: {metric_value}")
+        # print(f"{metric_name}: {metric_value}")
         wandb.log({f"{phase}_{metric_name}": metric_value})
 
     # Log the loss
-
     loss_value = loss.item() if torch.is_tensor(loss) else loss
     wandb.log({f"{phase}_loss": loss_value})
 
@@ -809,3 +769,323 @@ def update_best_regression_metrics(final_metrics, best_metrics):
         best_metrics["best_rmse"] = rmse
 
     return best_metrics, mae, mse, rmse
+
+
+def log_binary_classification_metrics_to_wandb(
+    phase,
+    epoch,
+    loss,
+    auc_score,
+    optimal_threshold,
+    y_true,
+    pred_labels,
+    label_map,
+    learning_rate=None,
+    do_log=False,
+):
+    if do_log:
+        # Log binary classification metrics to WandB
+        wandb.log({f"{phase}_epoch_loss": loss})
+        wandb.log({f"{phase}_AUC": auc_score})
+        wandb.log({f"{phase}_optimal_thresh": optimal_threshold})
+        # Convert predictions to label format
+
+        if pred_labels.ndim > 1 and pred_labels.shape[1] == 1:
+            pred_labels = pred_labels.flatten()
+
+        # Define your class names (replace with actual class names)
+        class_names = [str(label) for label in label_map]
+
+        # Log the confusion matrix in wandb
+        wandb.log(
+            {
+                f"{phase}_confusion_matrix": wandb.plot.confusion_matrix(
+                    probs=None, y_true=y_true, preds=pred_labels, class_names=class_names
+                )
+            }
+        )
+
+        if learning_rate is not None:
+            wandb.log({"learning_rate": learning_rate})
+
+
+def log_multiclass_metrics_to_wandb(
+    phase,
+    epoch,
+    metrics_summary,
+    labels_map,
+    y_true,
+    predictions,
+    learning_rate=None,
+    do_log=False,
+):
+    import seaborn as sns
+
+    """Log multi-class metrics to wandb.
+
+    Args:
+        phase (str): The phase of the evaluation (e.g., "train", "val").
+        epoch (int): The epoch number.
+        metrics_summary (dict): A dictionary containing the computed metrics summary.
+        labels_map (dict): A dictionary mapping class indices to class labels.
+        y_true (numpy.ndarray): The true labels.
+        predictions (numpy.ndarray): The predicted probabilities.
+
+    Raises:
+        None
+
+    Returns:
+        None
+
+    """
+    if do_log:
+        # Retrieve metrics
+        # Compute FPR and TPR
+        # fpr, tpr, _ = roc_curve(y_true, predictions)
+        roc_auc = metrics_summary["auc"]
+        conf_mat = metrics_summary["confmat"]
+
+        # Compute y_pred from predictions
+        y_pred = np.argmax(predictions, axis=1)
+
+        for i in labels_map.keys():
+            wandb.log({f"{phase}_roc_auc_class_{labels_map[i]}": roc_auc[i]})
+
+        if learning_rate is not None:
+            wandb.log({"learning_rate": learning_rate})
+
+        # For micro averaged AUC
+        wandb.log({f"{phase}_roc_auc_micro": metrics_summary["auc_weighted"]})
+
+        # Log the confusion matix as an image
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(
+            conf_mat,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=labels_map,
+            yticklabels=labels_map,
+            ax=ax,
+        )
+        ax.set_xlabel("Predicted Labels")
+        ax.set_ylabel("True Labels")
+        ax.set_title(f"{phase.capitalize()} Confusion Matrix - Epoch {epoch}")
+
+        # Log the confusion matrix as an image
+        wandb.log({f"{phase}_epoch_{epoch}_confusion_matrix": wandb.Image(fig)})
+        log_multiclass_roc_curve_to_wandb(y_true, predictions, labels_map, roc_auc, phase, epoch)
+
+
+def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, phase, epoch):
+    """
+    Log multi-class ROC curves to wandb.
+
+    Args:
+        y_true (torch.Tensor or numpy.ndarray): True class labels (integer encoded).
+        y_pred (numpy.ndarray): Predicted probabilities for each class.
+        labels_map (dict): Mapping from class indices to class names.
+        auc_array (numpy.ndarray): Array of AUC values for each class.
+        phase (str): Current phase ('train', 'val', etc.).
+        epoch (int): Current epoch.
+        do_log (bool): Flag to enable logging to wandb.
+    """
+    # Ensure y_true is of integer type
+    y_true = y_true.astype(int)
+
+    # Convert y_true to one-hot encoding
+
+    # Convert y_true to one-hot encoding if it's not already
+    if y_true.ndim == 1 or y_true.shape[1] == 1:
+        y_true = torch.nn.functional.one_hot(
+            torch.tensor(y_true), num_classes=len(labels_map)
+        ).numpy()
+
+    num_classes = y_true.shape[1]
+    fig, ax = plt.subplots()
+    colors = cycle(
+        [
+            "blue",
+            "green",
+            "red",
+            "cyan",
+            "magenta",
+            "yellow",
+            "black",
+            "purple",
+            "pink",
+            "lightblue",
+            "lightgreen",
+            "gray",
+        ]
+    )
+
+    for i, color in zip(range(num_classes), colors):
+        fpr, tpr, _ = roc_curve(y_true[:, i], y_pred[:, i])
+        label = labels_map.get(i, f"Class {i}")
+        ax.plot(
+            fpr,
+            tpr,
+            color=color,
+            lw=2,
+            label=f"ROC curve for {label} (area = {auc_array[i]:0.2f})",
+        )
+
+    ax.plot([0, 1], [0, 1], "k--", lw=2)
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title(f"Multi-Class ROC Curve for {phase.capitalize()} - Epoch {epoch}")
+    ax.legend(loc="lower right")
+
+    wandb.log({f"{phase}_roc_curve": wandb.Image(fig)})
+    for i, label in labels_map.items():
+        wandb.log({f"{phase}_roc_auc_class_{label}": auc_array[i]})
+
+
+def compute_optimal_threshold(y_true, y_scores):
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    j_index = tpr - fpr
+    optimal_idx = np.argmax(j_index)
+    optimal_threshold = thresholds[optimal_idx]
+    return optimal_threshold
+
+
+def update_classification_metrics(metrics, preds, target, num_classes):
+    """
+    Updates the classification metrics based on the predictions and targets.
+
+    Args:
+        metrics (dict): A dictionary containing the classification metrics to update.
+        preds (torch.Tensor): The predicted values.
+        target (torch.Tensor): The target values.
+        num_classes (int): The number of classes.
+
+    Examples:
+        >>> metrics = {'auc': AUC(), 'confmat': ConfusionMatrix()}
+        >>> preds = torch.tensor([0.8, 0.2, 0.6])
+        >>> target = torch.tensor([1, 0, 1])
+        >>> num_classes = 2
+        >>> update_classification_metrics(metrics, preds, target, num_classes)"""
+
+    if num_classes <= 2:
+        # Update for Binary Classification
+        metrics["auc"].update(preds, target.int())
+        metrics["confmat"].update((preds > 0.5).int(), target.int())
+    else:
+        # Update for Multi-Class Classification
+        # Convert predictions to label format
+        if preds.ndim > 1 and preds.shape[1] == 1:
+            pred_labels = preds.flatten()
+        # Ensure target is an integer tensor
+        target = target.long()
+        target_one_hot = torch.nn.functional.one_hot(target, num_classes=num_classes)
+        metrics["auc"].update(preds, target_one_hot)
+        metrics["auc_weighted"].update(preds, target)
+        metrics["confmat"].update(preds.argmax(dim=1), target)
+
+
+def compute_classification_metrics(metrics):
+    """
+    Computes classification metrics based on the provided metrics dictionary.
+
+    Args:
+        metrics (dict): A dictionary containing the metrics to compute.
+
+    Returns:
+        computed_metrics (dict): A dictionary containing the computed classification metrics.
+
+    Examples:
+        >>> metrics = {'accuracy': Accuracy(), 'precision': Precision()}
+        >>> computed_metrics = compute_classification_metrics(metrics)
+    """
+
+    computed_metrics = {}
+    for metric_name, metric in metrics.items():
+        computed_value = metric.compute()
+
+        # Check if tensor has a single element
+        if computed_value.numel() == 1:
+            computed_metrics[metric_name] = computed_value.item()
+        else:
+            # Convert to a floating point tensor before taking the mean
+            computed_value_float = computed_value.type(torch.float32)
+            computed_metrics[metric_name] = computed_value_float.mean().item()
+
+    for metric in metrics.values():
+        metric.reset()
+
+    return computed_metrics
+
+
+def compute_multiclass_metrics(metrics):
+    """
+    Computes multi-class classification metrics based on the provided metrics dictionary.
+
+    Args:
+        metrics (dict): A dictionary containing the metrics to compute.
+
+    Returns:
+        computed_metrics (dict): A dictionary containing the computed classification metrics.
+
+    Examples:
+        >>> metrics = {'auc': AUROC(), 'auc_micro': AUROC(), 'confmat': ConfusionMatrix()}
+        >>> computed_metrics = compute_multiclass_metrics(metrics)
+    """
+
+    computed_metrics = {}
+    for metric_name, metric in metrics.items():
+        computed_value = metric.compute()
+        # Handling different types of metric outputs
+        if isinstance(computed_value, torch.Tensor):
+            if computed_value.numel() == 1:
+                # Single value metrics (e.g., AUC, AUC Micro)
+                computed_metrics[metric_name] = computed_value.item()
+            else:
+                # Multi-value metrics (e.g., Confusion Matrix)
+                computed_metrics[metric_name] = computed_value.cpu().numpy()
+        else:
+            # In case of non-tensor metrics (if any)
+            computed_metrics[metric_name] = computed_value
+
+    for metric in metrics.values():
+        metric.reset()
+
+    return computed_metrics
+
+
+def initialize_classification_metrics(num_classes, device):
+    """
+    Initializes and returns a collection of classification metrics based on the number of classes.
+
+    Args:
+        num_classes (int): The number of classes.
+        device: The device to which the metrics should be moved.
+
+    Returns:
+        metrics (dict): A dictionary containing the initialized classification metrics.
+
+    Examples:
+        >>> num_classes = 2
+        >>> device = 'cuda:0'
+        >>> metrics = initialize_classification_metrics(num_classes, device)"""
+
+    if num_classes <= 2:
+        # Binary Classification Metrics
+        metrics = {
+            "auc": torchmetrics.AUROC(task="binary").to(device),
+            "confmat": torchmetrics.ConfusionMatrix(task="binary", num_classes=2).to(device),
+        }
+    else:
+        # Multi-Class Classification Metrics
+        metrics = {
+            "auc": torchmetrics.AUROC(task="multilabel", num_labels=num_classes, average=None).to(
+                device
+            ),
+            "auc_weighted": torchmetrics.AUROC(
+                task="multiclass", num_classes=num_classes, average="weighted"
+            ).to(device),
+            "confmat": torchmetrics.ConfusionMatrix(
+                task="multiclass", num_classes=num_classes
+            ).to(device),
+        }
+    return metrics

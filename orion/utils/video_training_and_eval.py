@@ -13,10 +13,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics
 import torchvision.transforms as transforms
-from sklearn import metrics as sk_metrics
-from sklearn import preprocessing
-from sklearn.metrics import auc, confusion_matrix, roc_curve
-from sklearn.preprocessing import label_binarize
 
 import wandb
 
@@ -35,8 +31,13 @@ from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_
 from orion.utils.plot import (
     bootstrap_metrics,
     bootstrap_multicalss_metrics,
+    compute_classification_metrics,
     compute_multiclass_metrics,
+    compute_optimal_threshold,
+    initialize_classification_metrics,
     initialize_regression_metrics,
+    log_binary_classification_metrics_to_wandb,
+    log_multiclass_metrics_to_wandb,
     log_regression_metrics_to_wandb,
     metrics_from_moving_threshold,
     plot_moving_thresh_metrics,
@@ -45,6 +46,7 @@ from orion.utils.plot import (
     plot_preds_distribution,
     plot_regression_graphics,
     update_best_regression_metrics,
+    update_classification_metrics,
 )
 
 try:
@@ -251,113 +253,15 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             },
         }
         for split in ["val", "test"]:
-            # Configure datasets for validation and testing splits
-            _, dataset = load_data(split, config, None, False)
-            split_sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-            split_dataloader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=config["batch_size"],
-                num_workers=config["num_workers"],
-                sampler=split_sampler,
-                shuffle=False,
-                pin_memory=(device.type == "cuda"),
-                drop_last=split != "test",
-            )
-
-            (
-                split_loss,
-                split_yhat,
-                split_y,
-                filenames,
-            ) = orion.utils.video_training_and_eval.train_or_evaluate_epoch(
-                model,
-                split_dataloader,
-                is_training=False,
-                phase=split,
-                optimizer=optimizer,
-                device=device,
-                epoch=epoch,
-                task=task,
-                save_all=False,
-                weights=None,
-                scaler=scaler,
-                use_amp=False,
-                scheduler=None,
-                metrics=metrics,
-                config=config,
-            )
-            # print(split_yhat.shape)
-
-            # split_yhat = sync_tensor_across_gpus(split_yhat)
-            # split_y = sync_tensor_across_gpus(split_y)
-            # print(split_yhat.shape)
-
-            # Convert targets and predictions to numpy arrays for subsequent calculations
-            split_y = np.array(split_y)
-            split_yhat = np.array(split_yhat)
-            print(split_y)
-            print(split_yhat)
-
-            # Process the output according to the task type
-            if task == "regression":
-                # Compute final metrics for regression
-                print("Current phase:", split)
-                print("Available keys in metrics:", metrics.keys())
-                final_metrics = metrics[split].compute()
-                metrics[split].reset()
-
-                # Update the best metrics and get the current metrics
-                best_metrics, mae, mse, rmse = update_best_regression_metrics(
-                    final_metrics, best_metrics[split]
-                )
-
-                if do_log:
-                    # Log regression metrics
-                    log_regression_metrics_to_wandb(split, final_metrics, split_loss, 0)
-                    # Plot regression graphics
-                    plot_regression_graphics(
-                        split_y, split_yhat, split, epoch, config["binary_threshold"], config
-                    )
-
-            elif task == "classification":
-                final_metrics = compute_classification_metrics(metrics[split])
-
-                if config["num_classes"] <= 2:
-                    # Binary classification logging
-                    log_binary_classification_metrics_to_wandb(
-                        split,
-                        epoch,
-                        split_loss,
-                        final_metrics["auc"],
-                        final_metrics["optimal_thresh"],
-                        split_y,
-                        final_metrics["pred_labels"],
-                        labels_map,
-                        do_log=do_log,
-                    )
-
-                else:
-                    # Multiclass classification logging
-                    log_multiclass_metrics_to_wandb(
-                        split,
-                        epoch,
-                        final_metrics,
-                        labels_map,
-                        split_y,
-                        split_yhat,
-                        do_log=do_log,
-                    )
-
-            # Save prediction results
-            if do_log:
-                df_predictions = pd.DataFrame(
-                    list(zip(filenames, split_y, split_yhat)),
-                    columns=["filename", "y_true", "y_hat"],
-                )
-                df_predictions.to_csv(os.path.join(config["output"], f"{split}_predictions.csv"))
+            if do_log == True:
+                # Configure datasets for validation and testing splits
+                perform_inference(config, split, metrics, best_metrics)
 
         # Clean up
         dist.destroy_process_group()
+
+        if args.local_rank == 0:
+            wandb.finish()
 
 
 def sync_tensor_across_gpus(t: torch.Tensor | None) -> torch.Tensor | None:
@@ -426,6 +330,7 @@ def setup_config(config, transforms, is_master):
     if config["view_count"] is None:
         print("Loading with 1 view count for mean and std")
         if (config["mean"] is None) or (config["std"] is None):
+            ## Load a datswet for normalization
             mean, std = orion.utils.get_mean_and_std(
                 orion.datasets.Video(
                     root=config["root"],
@@ -433,9 +338,10 @@ def setup_config(config, transforms, is_master):
                     target_label=config["target_label"],
                     data_filename=config["data_filename"],
                     datapoint_loc_label=config["datapoint_loc_label"],
-                    video_transforms=transforms,
+                    video_transforms=None,
                     resize=config["resize"],
                     weighted_sampling=False,
+                    normalize=False,
                 ),
                 batch_size=config["batch_size"],
                 num_workers=config["num_workers"],
@@ -551,7 +457,6 @@ def run_training_or_evaluate_orchestrator(
         # preds = model(inputs)  # Model predictions
         # target = ...  # Ground truth labels
         final_metrics = metrics[phase].compute()
-        print(final_metrics)
         metrics[phase].reset()
         auc_score = 0  # Temporary placeholder
         mean_roc_auc_no_nan = 0  # Temporary placeholder
@@ -568,7 +473,6 @@ def run_training_or_evaluate_orchestrator(
     elif task == "classification":
         if config["num_classes"] <= 2:
             final_metrics = compute_classification_metrics(metrics[phase])
-            print(final_metrics)
             optimal_thresh = compute_optimal_threshold(y, yhat)
             pred_labels = (yhat > optimal_thresh).astype(int)
 
@@ -587,22 +491,12 @@ def run_training_or_evaluate_orchestrator(
 
             mean_roc_auc_no_nan = final_metrics["auc"]
         else:
-            metrics_summary = calculate_multiclass_metrics(y, yhat, config["num_classes"])
+            metrics_summary = compute_multiclass_metrics(metrics[phase])
             log_multiclass_metrics_to_wandb(
                 phase, epoch, metrics_summary, labels_map, y, yhat, learning_rate, do_log=do_log
             )
             # Update the best metrics for multi-class classification, handle logic for your use case
-            roc_auc = metrics_summary["roc_auc"]
-
-            # Get the dictionary you mentioned, excluding 'micro' which is average itself
-            roc_auc_minus_micro = {k: v for k, v in roc_auc.items() if k != "micro"}
-
-            roc_auc_minus_micro_no_nan = {
-                k: v for k, v in roc_auc_minus_micro.items() if not np.isnan(v)
-            }
-
-            # Now compute the mean ROC AUC after the NaN values are removed
-            mean_roc_auc_no_nan = np.mean(list(roc_auc_minus_micro_no_nan.values()))
+            mean_roc_auc_no_nan = metrics_summary["auc_weighted"]
             print(f"Mean ROC AUC score after removing NaNs: {mean_roc_auc_no_nan}")
 
     # Update and save checkpoints
@@ -632,6 +526,7 @@ def run_training_or_evaluate_orchestrator(
             df_predictions = pd.DataFrame(
                 list(zip(filenames, y, yhat.squeeze())), columns=["filename", "y_true", "y_hat"]
             )
+            print(config["output"])
             filename = f"df_val_predictions_rank_{args.local_rank}.csv"
             df_predictions.to_csv(os.path.join(config["output"], filename))
 
@@ -665,274 +560,6 @@ def generate_output_dir_name(config):
     dir_name = f"{mname}_{bsize}_{fr}_{prd}_{optimizer}_{resume}_{current_time}"
 
     return dir_name
-
-
-def initialize_classification_metrics(num_classes, device):
-    """
-    Initializes and returns a collection of classification metrics based on the number of classes.
-
-    Args:
-        num_classes (int): The number of classes.
-        device: The device to which the metrics should be moved.
-
-    Returns:
-        metrics (dict): A dictionary containing the initialized classification metrics.
-
-    Examples:
-        >>> num_classes = 2
-        >>> device = 'cuda:0'
-        >>> metrics = initialize_classification_metrics(num_classes, device)"""
-
-    if num_classes <= 2:
-        # Binary Classification Metrics
-        metrics = {
-            "auc": torchmetrics.AUROC(task="binary").to(device),
-            "confmat": torchmetrics.ConfusionMatrix(task="binary", num_classes=2).to(device),
-        }
-    else:
-        # Multi-Class Classification Metrics
-        metrics = {
-            "auc": torchmetrics.AUROC(task="multilabel", num_classes=num_classes).to(device),
-            "auc_weighted": torchmetrics.AUROC(
-                task="multiclass", num_classes=num_classes, average="weighted"
-            ).to(device),
-            "confmat": torchmetrics.ConfusionMatrix(
-                task="multiclass", num_classes=num_classes
-            ).to(device),
-        }
-    return metrics
-
-
-def update_classification_metrics(metrics, preds, target, num_classes):
-    """
-    Updates the classification metrics based on the predictions and targets.
-
-    Args:
-        metrics (dict): A dictionary containing the classification metrics to update.
-        preds (torch.Tensor): The predicted values.
-        target (torch.Tensor): The target values.
-        num_classes (int): The number of classes.
-
-    Examples:
-        >>> metrics = {'auc': AUC(), 'confmat': ConfusionMatrix()}
-        >>> preds = torch.tensor([0.8, 0.2, 0.6])
-        >>> target = torch.tensor([1, 0, 1])
-        >>> num_classes = 2
-        >>> update_classification_metrics(metrics, preds, target, num_classes)"""
-
-    if num_classes <= 2:
-        # Update for Binary Classification
-        metrics["auc"].update(preds, target.int())
-        metrics["confmat"].update((preds > 0.5).int(), target.int())
-    else:
-        # Update for Multi-Class Classification
-        # Convert predictions to label format
-        print(preds)
-        if preds.ndim > 1 and preds.shape[1] == 1:
-            pred_labels = preds.flatten()
-        print(preds)
-        target_one_hot = torch.nn.functional.one_hot(target, num_classes=num_classes)
-        metrics["auc"].update(preds, target_one_hot)
-        metrics["auc_micro"].update(preds, target_one_hot)
-        metrics["confmat"].update(preds.argmax(dim=1), target)
-
-
-def compute_classification_metrics(metrics):
-    """
-    Computes classification metrics based on the provided metrics dictionary.
-
-    Args:
-        metrics (dict): A dictionary containing the metrics to compute.
-
-    Returns:
-        computed_metrics (dict): A dictionary containing the computed classification metrics.
-
-    Examples:
-        >>> metrics = {'accuracy': Accuracy(), 'precision': Precision()}
-        >>> computed_metrics = compute_classification_metrics(metrics)
-    """
-
-    computed_metrics = {}
-    for metric_name, metric in metrics.items():
-        computed_value = metric.compute()
-
-        # Check if tensor has a single element
-        if computed_value.numel() == 1:
-            computed_metrics[metric_name] = computed_value.item()
-        else:
-            # Convert to a floating point tensor before taking the mean
-            computed_value_float = computed_value.type(torch.float32)
-            computed_metrics[metric_name] = computed_value_float.mean().item()
-
-    for metric in metrics.values():
-        metric.reset()
-
-    return computed_metrics
-
-
-def compute_optimal_threshold(y_true, y_scores):
-    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-    j_index = tpr - fpr
-    optimal_idx = np.argmax(j_index)
-    optimal_threshold = thresholds[optimal_idx]
-    return optimal_threshold
-
-
-def log_binary_classification_metrics_to_wandb(
-    phase,
-    epoch,
-    loss,
-    auc_score,
-    optimal_threshold,
-    y_true,
-    pred_labels,
-    label_map,
-    learning_rate=None,
-    do_log=False,
-):
-    if do_log:
-        # Log binary classification metrics to WandB
-        wandb.log({f"{phase}_epoch_loss": loss})
-        wandb.log({f"{phase}_AUC": auc_score})
-        wandb.log({f"{phase}_optimal_thresh": optimal_threshold})
-        # Convert predictions to label format
-        print(pred_labels)
-        if pred_labels.ndim > 1 and pred_labels.shape[1] == 1:
-            pred_labels = pred_labels.flatten()
-        print(pred_labels)
-
-        # Define your class names (replace with actual class names)
-        class_names = [str(label) for label in label_map]
-
-        # Log the confusion matrix in wandb
-        wandb.log(
-            {
-                f"{phase}_confusion_matrix": wandb.plot.confusion_matrix(
-                    probs=None, y_true=y_true, preds=pred_labels, class_names=class_names
-                )
-            }
-        )
-
-        if learning_rate is not None:
-            wandb.log({"learning_rate": learning_rate})
-
-
-def log_multiclass_metrics_to_wandb(
-    phase,
-    epoch,
-    metrics_summary,
-    labels_map,
-    y_true,
-    predictions,
-    learning_rate=None,
-    do_log=False,
-):
-    """Log multi-class metrics to wandb.
-
-    Args:
-        phase (str): The phase of the evaluation (e.g., "train", "val").
-        epoch (int): The epoch number.
-        metrics_summary (dict): A dictionary containing the computed metrics summary.
-        labels_map (dict): A dictionary mapping class indices to class labels.
-        y_true (numpy.ndarray): The true labels.
-        predictions (numpy.ndarray): The predicted probabilities.
-
-    Raises:
-        None
-
-    Returns:
-        None
-
-    """
-
-    # Retrieve metrics
-    fpr = metrics_summary["fpr"]
-    tpr = metrics_summary["tpr"]
-    roc_auc = metrics_summary["roc_auc"]
-    conf_mat = metrics_summary["conf_mat"]
-    # print("conf_mat", conf_mat)
-
-    # Compute y_pred from predictions
-    y_pred = np.argmax(predictions, axis=1)
-    # print(y_pred)
-
-    # Prepare ROC curve plot for multi-class classification
-    fig, ax = plt.subplots()
-    colors = cycle(
-        [
-            "blue",
-            "green",
-            "red",
-            "cyan",
-            "magenta",
-            "yellow",
-            "black",
-            "purple",
-            "pink",
-            "lightblue",
-            "lightgreen",
-            "gray",
-        ]
-    )
-
-    for i, color in zip(labels_map, colors):
-        plt.plot(
-            fpr[i],
-            tpr[i],
-            color=color,
-            lw=2,
-            label=f"ROC curve for class {labels_map[i]} (area = {roc_auc[i]:0.2f})",
-        )
-
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title(f"Multi-Class ROC curve for {phase} phase, epoch {epoch}")
-    plt.legend(loc="lower right")
-    # Log the AUC for each class and overall micro averaged AUC
-    if do_log:
-        for i in labels_map.keys():
-            wandb.log({f"{phase}_roc_auc_class_{labels_map[i]}": roc_auc[i]})
-
-        if learning_rate is not None:
-            wandb.log({"learning_rate": learning_rate})
-
-            # ...
-
-        # For micro averaged AUC
-        wandb.log({f"{phase}_roc_auc_micro": roc_auc["micro"]})
-        # Log the ROC curve and confusion matrix with whttps://vscode-remote+attached-002dcontainer-002b7b22636f6e7461696e65724e616d65223a222f61676974617465645f77696c6c69616d73227d-0040ssh-002dremote-002b10-002e128-002e228-002e213.vscode-resource.vscode-cdn.net/root/miniconda3/lib/python3.10/site-packages/sklearn/metrics/_ranking.py:1133andb
-
-    # Create a remapping dictionary from your original labels to new labels
-    remapping_dict = {
-        original_label: new_label
-        for new_label, original_label in enumerate(sorted(labels_map.keys()))
-    }
-    # Remap your original labels_map to match new labels
-    labels_map_remap = {
-        new_label: labels_map[original_label]
-        for original_label, new_label in remapping_dict.items()
-    }
-
-    # Remap y_true and y_pred using the remapping dictionary
-    y_true_remap = np.vectorize(remapping_dict.get)(y_true)
-
-    # Safeguard the remapping to handle values not in remapping_dict
-    remap_function = lambda x: remapping_dict.get(x, -1)
-    y_pred_remap = np.vectorize(remap_function)(y_pred.squeeze())  # Ensure y_pred is a 1D array
-
-    if not all([el is not None for el in y_pred]):
-        print("y_pred contains None values")
-
-    if not all([el is not None for el in y_true]):
-        print("y_true contains None values")
-    if do_log:
-        wandb.log(
-            {
-                f"{phase}_roc_curve_epoch_{epoch}": wandb.Image(fig),
-                # f"{phase}_conf_mat_epoch_{epoch}": wandb.plot.confusion_matrix(
-                #    probs=None, y_true=y_true_remap, preds=y_pred_remap, class_names=list(labels_map_remap.values()))
-            }
-        )
 
 
 def update_and_save_checkpoints(
@@ -978,13 +605,14 @@ def update_and_save_checkpoints(
         # Always save the latest checkpoint
         save_data = {
             "epoch": epoch,
-            "state_dict": model.state_dict(),
+            "model_state_dict": model.state_dict(),
             "loss": current_loss,
+            "best_loss": best_loss,
             "auc": current_auc
             if current_auc is not None
             else -1,  # save with -1 if AUC is not applicable
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
         }
         torch.save(save_data, save_path)
 
@@ -1039,7 +667,7 @@ def should_update_best_performance(
         raise ValueError(f"Invalid criterion specified: {criterion}. Choose 'loss' or 'auc'.")
 
 
-def build_model(config, device, model_path=None):
+def build_model(config, device, model_path=None, for_inference=False):
     """
     Build and initialize the model based on the configuration.
 
@@ -1106,28 +734,50 @@ def build_model(config, device, model_path=None):
             sep="µ",
             engine="python",
         )
-        # uses label and int_label column from datasetfor wandb plotting
-        labels_map = dict(
-            zip(
-                dataset[config["target_label"]],
-                dataset[config["label_loc_label"]],
-            )
-        )
-        labels_map = dict(sorted(labels_map.items(), key=lambda item: item[1]))
-        print("Labels map", labels_map)
+        # Initialize labels_map with None for each class index
+        labels_map = {i: None for i in range(config["num_classes"])}
+
+        # Update labels_map with actual labels from dataset
+        for int_label, label in zip(
+            dataset[config["target_label"]], dataset[config["label_loc_label"]]
+        ):
+            labels_map[int(int_label)] = label
+
+        print("Labels map before sorting:", labels_map)
+
+        # Optionally, sort the labels_map if needed
+        labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
+
+        print("Labels map after sorting:", labels_map)
     else:
         labels_map = None
 
-    # Loading pretrained weights if specified
-    if model_path and config["resume"] == True:
-        ##TO DO : TEST RESUMING AND MAKE SURE YOU GET THE RIGHT PREDICTIONS AND TRAINING
-        print("Loading checkpoint", model_path)
-        # configure map_location properly
-        map_location = {"cuda:%d" % 0: "cuda:%d" % device.index}
-        print("Map location", map_location)
+    # Check if the model should be resumed or used for inference
+    if (model_path and config["resume"]) or for_inference:
+        # TODO: Test resuming to ensure correct predictions and training continuation
+        print("Device in use:", device)
 
-        checkpoint = torch.load(model_path, map_location=map_location)
-        # print("Model ddp", checkpoint)
+        # Set a default value for map_location
+        map_location = None
+
+        # Load the checkpoint if not in inference mode and a model path is provided
+        if not for_inference and model_path:
+            print("Loading checkpoint:", model_path)
+
+            # Configure map_location to map to the specific GPU
+            map_location = {f"cuda:{0}": f"cuda:{device.index}"}
+            print("Map location set to:", map_location)
+        elif not model_path:
+            # Handle case where model path is None
+            model_path = os.path.join(config["output"], "best.pt")
+
+        # Ensure map_location has a value before loading the checkpoint
+        if map_location:
+            checkpoint = torch.load(model_path, map_location=map_location)
+        else:
+            checkpoint = torch.load(model_path)
+        # Uncomment below to debug checkpoint content
+        # print("Model checkpoint content:", checkpoint)
 
         model_state_dict = checkpoint["state_dict"]
         torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
@@ -1136,14 +786,15 @@ def build_model(config, device, model_path=None):
 
         model.load_state_dict(model_state_dict)
         model.to(device)
-
-        model = nn.parallel.DistributedDataParallel(
-            model, device_ids=[device.index], output_device=device.index
-        )
+        if for_inference == False:
+            ### Dont do distributed data parallel if inference is true.
+            model = nn.parallel.DistributedDataParallel(
+                model, device_ids=[device.index], output_device=device.index
+            )
 
         # Additional code to load optimizer and scheduler states, and epoch
-        optimizer_state = checkpoint.get("optimizer_state_dict")
-        scheduler_state = checkpoint.get("scheduler_state_dict")
+        optimizer_state = checkpoint.get("optimizer")
+        scheduler_state = checkpoint.get("scheduler")
         epoch = checkpoint.get("epoch", 0)
         bestLoss = checkpoint.get("best_loss", float("inf"))
         other_metrics = {
@@ -1165,36 +816,6 @@ def build_model(config, device, model_path=None):
     return model, None, None, 0, float("inf"), {}, labels_map
 
 
-## ROBERT : TO REMOVE
-def load_data_for_inference(config):
-    """
-    Create a DataLoader for the Video dataset specifically for inference using the provided configuration.
-
-    Args:
-        config (dict): Configuration dictionary containing dataset parameters.
-
-    Returns:
-        torch.utils.data.DataLoader: DataLoader ready for inference.
-    """
-    dataset = orion.datasets.Video(
-        root=config["root"],
-        data_filename=config["data_filename"],
-        datapoint_loc_label=config["datapoint_loc_label"],
-        split=config["split"],
-        video_transforms=config.get("transforms", None),
-        target_label="y_pred_cat",
-        mean=config["mean"],
-        std=config["std"],
-        resize=config["resize"],
-    )
-
-    if len(dataset) == 0:
-        raise ValueError("The dataset is empty. Check the file paths and CSV formatting.")
-
-    loader = torch.utils.data.DataLoader(dataset, batch_size=config["batch_size"], shuffle=False)
-    return loader
-
-
 def load_data(split, config, transforms, weighted_sampling):
     """
     Load Video dataset for a given split (train, val, test).
@@ -1208,19 +829,23 @@ def load_data(split, config, transforms, weighted_sampling):
     Returns:
         DataLoader: The DataLoader for the specified dataset split.
     """
-    kwargs = {
-        "target_label": config["target_label"],
-        "mean": config["mean"],
-        "std": config["std"],
-        "length": config["frames"],
-        "period": config["period"],
-        "root": config["root"],
-        "data_filename": config["data_filename"],
-        "datapoint_loc_label": config["datapoint_loc_label"],
-        "apply_mask": config["apply_mask"],
-        "resize": config["resize"],
-        "model_name": config["model_name"],
-    }
+    if config["mean"] is None or config["std"] is None:
+        print("Error: 'mean' or 'std' values are missing.")
+        return None, None
+    else:
+        kwargs = {
+            "target_label": config["target_label"],
+            "mean": config["mean"],
+            "std": config["std"],
+            "length": config["frames"],
+            "period": config["period"],
+            "root": config["root"],
+            "data_filename": config["data_filename"],
+            "datapoint_loc_label": config["datapoint_loc_label"],
+            "apply_mask": config["apply_mask"],
+            "resize": config["resize"],
+            "model_name": config["model_name"],
+        }
 
     if config["view_count"] is None:
         dataset = orion.datasets.Video(
@@ -1346,11 +971,16 @@ def train_or_evaluate_epoch(
     predictions, targets, filenames = [], [], []
     model_loss = config.get("loss")
     with torch.set_grad_enabled(is_training):
-        with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}") as pbar:
+        with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
             for batch in dataloader:
+                # print(device)
                 data, outcomes, fname = batch
                 data, outcomes = data.to(device), outcomes.to(device)
                 filenames.extend(fname)
+                # print("Data shape:", data.shape)
+                # print("Data type:", data.dtype)
+                # print("Data device:", data.device)
+                # print("Is data empty?", data.nelement() == 0)
 
                 # Handle non-4D data if block_size is provided
                 if (
@@ -1363,7 +993,6 @@ def train_or_evaluate_epoch(
                 with torch.autocast(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
-                    print("Use amp", use_amp)
                     # Get model outputs, handle block_size within output generation
 
                     outputs = model(data)
@@ -1374,9 +1003,10 @@ def train_or_evaluate_epoch(
                         # print("Outcomes", outcomes)
                         # print("fname", fname)
                         # Conditional squeeze: only apply if there are more than 1 dimension
-                        if outputs.dim() > 1:
+                        if outputs.dim() > 1 and any(size > 1 for size in outputs.shape):
                             outputs = outputs.squeeze()
-                        # print("Outputs post squeeze", outputs)
+                        else:
+                            outputs = outputs.view(-1)
                         metrics[phase].update(outputs, outcomes)
                         loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
                     elif task == "classification":
@@ -1387,11 +1017,6 @@ def train_or_evaluate_epoch(
                         update_classification_metrics(
                             metrics[phase], outputs, outcomes, config["num_classes"]
                         )
-
-                        # print(outputs)
-                        # print("Pre squeeze", outputs.shape)
-
-                        # print("Post squeeze", outputs.shape)
 
                         loss = compute_classification_loss(
                             outputs, outcomes, model_loss, weights
@@ -1487,7 +1112,7 @@ def compute_classification_loss(outputs, targets, model_loss, weights):
     return criterion(outputs, targets)
 
 
-def perform_inference(config):
+def perform_inference(split, config, metrics=None, best_metrics=None):
     """
     Perform inference using the specified model and data based on the provided configuration.
 
@@ -1499,25 +1124,110 @@ def perform_inference(config):
     """
     # Build and load the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = build_model(config, device, model_path=config["chkpt_path"])
-    model.to(device)
+    task = config["task"]
+    (
+        model,
+        optim_state,
+        sched_state,
+        epoch_resume,
+        bestLoss,
+        other_metrics,
+        labels_map,
+    ) = build_model(config, device, model_path=config["chkpt_path"], for_inference=True)
     model.eval()
 
     # Create data loader for inference
-    dataloader = load_data_for_inference(config)
+    split_dataloader, dataset = load_data(split, config, None, False)
 
-    # Perform inference
-    predictions = {}
-    with torch.no_grad():
-        for X, _, filenames in dataloader:
-            X = X.to(device)
-            outputs = model(X)
+    (
+        split_loss,
+        split_yhat,
+        split_y,
+        filenames,
+    ) = orion.utils.video_training_and_eval.train_or_evaluate_epoch(
+        model,
+        split_dataloader,
+        is_training=False,
+        phase=split,
+        optimizer=None,
+        device=device,
+        epoch=epoch_resume,
+        task=task,
+        save_all=False,
+        weights=None,
+        scaler=None,
+        use_amp=True,
+        scheduler=None,
+        metrics=metrics,
+        config=config,
+    )
+    # print(split_yhat.shape)
 
-            for filename, output in zip(filenames, outputs):
-                predictions[filename] = output.cpu().numpy()
+    # split_yhat = sync_tensor_across_gpus(split_yhat)
+    # split_y = sync_tensor_across_gpus(split_y)
+    # print(split_yhat.shape)
 
-    return predictions
+    # Convert targets and predictions to numpy arrays for subsequent calculations
+    split_y = np.array(split_y)
+    split_yhat = np.array(split_yhat)
+
+    # Process the output according to the task type
+    if task == "regression":
+        # Compute final metrics for regression
+        # print("Current phase:", split)
+        # print("Available keys in metrics:", metrics.keys())
+        final_metrics = metrics[split].compute()
+        metrics[split].reset()
+
+        # Update the best metrics and get the current metrics
+        best_metrics, mae, mse, rmse = update_best_regression_metrics(
+            final_metrics, best_metrics[split]
+        )
+
+        # Log regression metrics
+        log_regression_metrics_to_wandb(split, final_metrics, split_loss, 0)
+        # Plot regression graphics
+        plot_regression_graphics(
+            split_y, split_yhat, split, epoch, config["binary_threshold"], config
+        )
+
+    elif task == "classification":
+        final_metrics = compute_classification_metrics(metrics[split])
+        optimal_thresh = compute_optimal_threshold(split_y, split_yhat)
+        pred_labels = (split_yhat > optimal_thresh).astype(int)
+        if config["num_classes"] <= 2:
+            # Binary classification logging
+            log_binary_classification_metrics_to_wandb(
+                split,
+                epoch_resume,
+                split_loss,
+                final_metrics["auc"],
+                optimal_thresh,
+                split_y,
+                pred_labels,
+                labels_map,
+                do_log=True,
+            )
+
+        else:
+            # Multiclass classification logging
+            log_multiclass_metrics_to_wandb(
+                split,
+                epoch_resume,
+                final_metrics,
+                labels_map,
+                split_y,
+                split_yhat,
+                do_log=True,
+            )
+
+    df_predictions = pd.DataFrame(
+        list(zip(filenames, split_y, split_yhat)),
+        columns=["filename", "y_true", "y_hat"],
+    )
+    df_predictions.to_csv(os.path.join(config["output"], f"{split}_predictions.csv"))
+
+    return df_predictions
 
 
 def create_transforms(config):
@@ -1547,6 +1257,7 @@ def setup_run(args, config_defaults):
             config=config_defaults,
             name=config_defaults["project"],  # Assuming 'tag' is an attribute of args
             resume=config_defaults.get("resume", False),
+            id=config_defaults.get("wandb_id", None),
         )
     else:
         run = None

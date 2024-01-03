@@ -3,17 +3,17 @@ import os
 import pathlib
 import sys
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import skimage.draw
+import torch
 import torch.utils.data
 import torchvision
 from torchvision.transforms import v2
 
+# Global variable for directory paths
 dir2 = os.path.abspath("/volume/Orion/orion")
 dir1 = os.path.dirname(dir2)
-if not dir1 in sys.path:
+if dir1 not in sys.path:
     sys.path.append(dir1)
 
 import orion
@@ -21,74 +21,34 @@ import orion
 
 class Video(torch.utils.data.Dataset):
     """
-    ---------------------------------------------------------------------------------
-    Purpose:
-        * makes orion dataset from mu seperated csv file
-    ---------------------------------------------------------------------------------
+    A dataset class for handling orion video data.
+
     Args:
-        ** data_filename
-            - string or None (None): mu seperated csv file main func input
-        * root
-            - string ('../../data/'): Root directory of dataset
-        * split
-            - string ('train'): One of {"train", "val", "test"} tells orion which data to load
-                    from csv
-        * target_label
-            - string ("HCM"): Column name of disease column to use
-        * datapoint_loc_label
-            - string ("FileName2"): Column name of filepath column to use
-        * resize
-            - int or None, optional (224): Dimensions to resize video to for both height and width
-        * mean
-            - int, float, or np.array shape=(3,), optional (0.): means for all (if scalar)
-                    or each (if np.array) channel. Used for normalizing the video
-        * std
-            - int, float, or np.array shape=(3,), optional (1.): standard deviation for all
-                    (if scalar) or each (if np.array) channel. Used for normalizing the video
-        * length
-            - int, optional (32): Number of frames to clip from video. If ``None'',
-                    longest possible clip is returned.
-        * period
-            - int, optional (1): Sampling period for taking a clip from the video
-                    (i.e. every ``period''-th frame is taken)
-        * max_length
-            - int or None, optional (250): Maximum number of frames to clip from video
-                    (main use is for shortening excessively long videos when ``length'' is set to None).
-                    If ``None'', shortening is not applied to any video.
-        * pad
-            - int or None, optional (None): Number of pixels to pad all frames on each
-                    side (used as augmentation) and a window of the original size is
-                    taken. If ``None'', no padding occurs.
-        * noise
-            - float or None, optional (None): Fraction of pixels to black out as simulated noise.
-                    If ``None'', no simulated noise is added.
-        * video_transforms
-            - list or None, optional (None): List of torchvision transforms to apply to videos.
-        * rand_augment
-            - True or False (False): Applies random augment to videos to increase performance and
-                    robustness. *Caution* is computationally intensive. https://arxiv.org/abs/1909.13719
-        * apply_mask
-            - True or False (False): Multiplies videos with mask videos for deid and localization.
-                    Masks are gathered from dir one level higher called 'mask' and ending in .npy
-        * target_transform
-            - None or list optional (None): I have no clue why this exists -Sean
-        * external_test_location
-            - string: Path to video dir to use for external testing
-    ---------------------------------------------------------------------------------
+        root (str): Root directory of the dataset. Defaults to '../../data/'.
+        data_filename (str): Name of the data file. Defaults to None.
+        split (str): Dataset split to use ('train', 'val', 'test'). Defaults to 'train'.
+        target_label (str): Name of the target label column. Defaults to None.
+        datapoint_loc_label (str): Column name for file paths. Defaults to 'FileName'.
+        resize (int): Size to resize videos to (height, width). Defaults to 224.
+        mean (float or np.array): Channel-wise means for normalization. Defaults to 0.0.
+        std (float or np.array): Channel-wise stds for normalization. Defaults to 1.0.
+        length (int): Number of frames to clip from the video. Defaults to 32.
+        period (int): Sampling period for frame clipping. Defaults to 1.
+        max_length (int): Max number of frames to clip. Defaults to 250.
+        pad (int): Number of pixels for padding frames. Defaults to None.
+        noise (float): Fraction of pixels to black out as noise. Defaults to None.
+        video_transforms (list): List of torchvision transforms. Defaults to None.
+        rand_augment (bool): Apply random augmentation. Defaults to False.
+        apply_mask (bool): Apply masking to videos. Defaults to False.
+        target_transform (callable): Transform to apply to the target. Defaults to None.
+        external_test_location (str): Path for external testing videos. Defaults to None.
+
     Returns:
-        * normalized, resized, augmented videos of equal length and a list of their labels
-                which are fed directly into our models.
-    ---------------------------------------------------------------------------------
-    Sanity Checks / Bug fixes:
-        * Augmenations, normalizations, frame sampling and resizing have all been
-                visualized and rigorously tested.
-    ---------------------------------------------------------------------------------
-    Called By:
-        * Files
-            orion.utils.video_class
-    ---------------------------------------------------------------------------------
-    TODO:
-        * Incorperate ECGs
+        Tuple: normalized, resized, and augmented videos with labels.
+
+    Note:
+        Augmentations, normalizations, frame sampling, and resizing have been
+        rigorously tested and visualized.
     """
 
     def __init__(
@@ -96,7 +56,7 @@ class Video(torch.utils.data.Dataset):
         root="../../data/",
         data_filename=None,
         split="train",
-        target_label=None,  # Make target_label optional
+        target_label=None,
         datapoint_loc_label="FileName",
         resize=224,
         mean=0.0,
@@ -110,13 +70,14 @@ class Video(torch.utils.data.Dataset):
         video_transforms=None,
         rand_augment=False,
         apply_mask=False,
-        num_classes=None,
         target_transform=None,
         external_test_location=None,
         weighted_sampling=False,
         model_name=None,
+        normalize=True,
         debug=False,
     ) -> None:
+        # Initialize instance variables
         self.folder = pathlib.Path(root)
         self.filename = data_filename
         self.datapoint_loc_label = datapoint_loc_label
@@ -124,8 +85,8 @@ class Video(torch.utils.data.Dataset):
         if not isinstance(target_label, list):
             target_label = [target_label]
         self.target_label = target_label
-        self.mean = mean
-        self.std = std
+        self.mean = format_mean_std(mean)
+        self.std = format_mean_std(std)
         self.length = length
         self.max_length = max_length
         self.period = period
@@ -141,6 +102,7 @@ class Video(torch.utils.data.Dataset):
         self.weighted_sampling = weighted_sampling
         self.debug = debug
         self.model_name = model_name
+        self.normalize = normalize
 
         self.fnames, self.outcome = [], []
         if split == "external_test":
@@ -240,8 +202,10 @@ class Video(torch.utils.data.Dataset):
         video = torch.from_numpy(video)
         if self.resize is not None:
             video = v2.Resize((self.resize, self.resize), antialias=True)(video)
+        if self.normalize == True:
+            if hasattr(self, "mean") and hasattr(self, "std"):
+                video = v2.Normalize(self.mean, self.std)(video)
 
-        #         pdb.set_trace()
         if self.video_transforms is not None:
             transforms = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
             scripted_transforms = torch.jit.script(transforms)
@@ -451,6 +415,7 @@ class Video_Multi(torch.utils.data.Dataset):
         target_transform=None,
         external_test_location=None,
         debug=False,
+        normalize=True,
     ) -> None:
         self.folder = pathlib.Path(root)
         self.filename = data_filename
@@ -459,8 +424,8 @@ class Video_Multi(torch.utils.data.Dataset):
         # if not isinstance(target_label, list):
         #     target_label = [target_label]
         self.target_label = target_label
-        self.mean = mean
-        self.std = std
+        self.mean = format_mean_std(mean)
+        self.std = format_mean_std(std)
         self.length = length
         self.max_length = max_length
         self.period = period
@@ -486,10 +451,6 @@ class Video_Multi(torch.utils.data.Dataset):
             splitIndex = df_dataset.columns.get_loc("Split")
             target_index = df_dataset.columns.get_loc(target_label)
             artery_index = df_dataset.columns.get_loc("artery_label")
-
-            print(df_dataset)
-            print(splitIndex)
-            print(targetIndex)
 
             for _, row in df_dataset.iterrows():
                 view_count = int(row[view_countIndex])
@@ -581,10 +542,8 @@ class Video_Multi(torch.utils.data.Dataset):
 
         # If self.mean and self.std are defined, apply normalization
         if hasattr(self, "mean") and hasattr(self, "std"):
-            if isinstance(self.mean, float):
-                video = v2.Normalize(self.mean, self.std)(video)
-            else:
-                video = v2.Normalize(self.mean[count], self.std[count])(video)
+            video = v2.Normalize(self.mean, self.std)(video)
+
         # if self.debug is True:
         #    self.plot_middle_frame(video, "after normalize", index)
         if self.video_transforms is not None:
@@ -740,3 +699,55 @@ def _defaultdict_of_lists():
     """
 
     return collections.defaultdict(list)
+
+
+def format_mean_std(input_value):
+    """
+    Formats the mean or std value to a list of floats.
+
+    Args:
+        input_value (str, list, np.array): The input mean/std value.
+
+    Returns:
+        list: A list of floats.
+
+    Raises:
+        ValueError: If the input cannot be converted to a list of floats.
+    """
+
+    if input_value is 1.0 or input_value is 0.0:
+        print("Mean/STD value is not defined")
+        return input_value
+
+    # Check if input is a list with a single string element
+    if (
+        isinstance(input_value, list)
+        and len(input_value) == 1
+        and isinstance(input_value[0], str)
+    ):
+        # Extract the string from the list and process it
+        input_value = input_value[0]
+
+    if isinstance(input_value, str):
+        # Remove any brackets or extra whitespace and split the string
+        cleaned_input = (
+            input_value.replace("[", "").replace("]", "").strip().replace("’", "").split()
+        )
+        try:
+            # Convert the split string values to float
+            formatted_value = [float(val) for val in cleaned_input]
+        except ValueError:
+            raise ValueError("String input for mean/std must be space-separated numbers.")
+    elif isinstance(input_value, (list, np.ndarray)):
+        try:
+            # Convert elements to float
+            formatted_value = [float(val) for val in input_value]
+        except ValueError:
+            raise ValueError("List or array input for mean/std must contain numbers.")
+    else:
+        raise TypeError("Input for mean/std must be a string, list, or numpy array.")
+
+    if len(formatted_value) != 3:
+        raise ValueError("Mean/std must have exactly three elements (for RGB channels).")
+
+    return formatted_value

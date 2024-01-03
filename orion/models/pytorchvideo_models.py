@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torchvision.models.video
 from pytorchvideo.models.accelerator.mobile_cpu.efficient_x3d import (
     create_x3d as create_efficient_x3d,
 )
@@ -10,7 +11,7 @@ from pytorchvideo.models.slowfast import create_slowfast
 
 # from pytorchvideo.models.vision_transformers import create_multiscale_vision_transformers
 from pytorchvideo.models.x3d import create_x3d
-import torchvision.models.video
+
 
 def get_model(model_name, kwargs):
     """ "
@@ -40,7 +41,8 @@ def get_model(model_name, kwargs):
         assert 1 == 0, "Model not found."
     return model
 
-#However, in many deep learning frameworks like PyTorch, the activation function is not explicitly included in the model's architecture for classification tasks. Instead, it's integrated into the loss function during training. For example:
+
+# However, in many deep learning frameworks like PyTorch, the activation function is not explicitly included in the model's architecture for classification tasks. Instead, it's integrated into the loss function during training. For example:
 def get_last_layer_name(model):
     last_layer_name = None
     for name, module in model.named_modules():
@@ -48,11 +50,9 @@ def get_last_layer_name(model):
     return last_layer_name
 
 
-
-
-#or multi-class classification, you often use the CrossEntropyLoss in PyTorch, which internally applies the softmax function.
-#For binary classification, you might use BCEWithLogitsLoss, which applies the sigmoid function.
-#Therefore, while the model's architecture ends with a linear layer, the softmax or sigmoid activation is still applied during training and inference, but it's just handled differently than being a direct part of the sequential model layers. This approach is computationally efficient and also helps with numerical stability.
+# or multi-class classification, you often use the CrossEntropyLoss in PyTorch, which internally applies the softmax function.
+# For binary classification, you might use BCEWithLogitsLoss, which applies the sigmoid function.
+# Therefore, while the model's architecture ends with a linear layer, the softmax or sigmoid activation is still applied during training and inference, but it's just handled differently than being a direct part of the sequential model layers. This approach is computationally efficient and also helps with numerical stability.
 
 
 def get_pretrained_model(model_name, num_classes=400, task="classification"):
@@ -242,25 +242,28 @@ def get_pretrained_model(model_name, num_classes=400, task="classification"):
         print("Importing swin3d_s for num_classes", num_classes)
         model = torchvision.models.video.swin3d_s(weights="KINETICS400_V1")
         n_inputs = model.head.in_features
-        model.head = nn.Linear(n_inputs, num_classes)  # Replace the classifier head for any number of classes.
         if task == "classification":
             model.head = nn.Linear(n_inputs, num_classes)
         elif task == "regression":
-            model.head = nn.Linear(n_inputs, 1)  # For regression, typically we predict a single value
+            model.head = nn.Linear(
+                n_inputs, 1
+            )  # For regression, typically we predict a single value
         # No need to add Softmax or Sigmoid here - Do it during inference
-    
+
     elif model_name == "swin3d_b":
         print("Importing swin3d_b for num_classes", num_classes)
         model = torchvision.models.video.swin3d_b(weights="KINETICS400_IMAGENET22K_V1")
         n_inputs = model.head.in_features
-        
+
         if task == "classification":
             model.head = nn.Linear(n_inputs, num_classes)
         elif task == "regression":
-            model.head = nn.Linear(n_inputs, 1)  # For regression, typically we predict a single value
+            model.head = nn.Linear(
+                n_inputs, 1
+            )  # For regression, typically we predict a single value
 
         # No need to add Softmax or Sigmoid here - Do it during inference
-    
+
     else:
         assert False, "Pretrained model not found."
 
