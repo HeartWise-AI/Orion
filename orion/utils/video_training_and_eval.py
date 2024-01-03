@@ -86,6 +86,10 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     print("is main process", is_main_process)
     torch.cuda.set_device(device)
 
+    # Use model_path from config, or default to config["output"] if model_path is None
+    model_path = config.get("model_path") or config["output"]
+
+    print("Model path:", model_path)
     # Model building and training setup
     (
         model,
@@ -95,7 +99,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         bestLoss,
         other_metrics,
         labels_map,
-    ) = build_model(config, device, model_path=config.get("model_path"))
+    ) = build_model(config, device, model_path=model_path)
 
     ## DDP works with TorchDynamo. When used with TorchDynamo, apply the DDP model wrapper before compiling the model,
     # such that torchdynamo can apply DDPOptimizer (graph-break optimizations) based on DDP bucket sizes.
@@ -237,6 +241,9 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             print(f"Epoch {epoch} {phase} time: {time.time() - start_time}")
 
     if config["run_test"]:
+        # Clean up
+        dist.destroy_process_group()
+
         # Initialize best_metrics for each split
         best_metrics = {
             "val": {
@@ -255,10 +262,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         for split in ["val", "test"]:
             if do_log == True:
                 # Configure datasets for validation and testing splits
-                perform_inference(config, split, metrics, best_metrics)
-
-        # Clean up
-        dist.destroy_process_group()
+                perform_inference(split, config, metrics, best_metrics)
 
         if args.local_rank == 0:
             wandb.finish()
@@ -779,7 +783,7 @@ def build_model(config, device, model_path=None, for_inference=False):
         # Uncomment below to debug checkpoint content
         # print("Model checkpoint content:", checkpoint)
 
-        model_state_dict = checkpoint["state_dict"]
+        model_state_dict = checkpoint["model_state_dict"]
         torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
             model_state_dict, "_orig_mod.module."
         )
@@ -793,8 +797,8 @@ def build_model(config, device, model_path=None, for_inference=False):
             )
 
         # Additional code to load optimizer and scheduler states, and epoch
-        optimizer_state = checkpoint.get("optimizer")
-        scheduler_state = checkpoint.get("scheduler")
+        optimizer_state = checkpoint.get("optimizer_state_dict")
+        scheduler_state = checkpoint.get("scheduler_state_dict")
         epoch = checkpoint.get("epoch", 0)
         bestLoss = checkpoint.get("best_loss", float("inf"))
         other_metrics = {
@@ -1124,7 +1128,12 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
     """
     # Build and load the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    task = config["task"]
+
+    # Use model_path from config, or default to config["output"] if model_path is None
+    model_path = config.get("model_path") or config["output"]
+    model_path = os.path.join(model_path, "best.pt")
+    print(model_path)
+    task = config.get("task", "regression")
     (
         model,
         optim_state,
@@ -1133,7 +1142,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
         bestLoss,
         other_metrics,
         labels_map,
-    ) = build_model(config, device, model_path=config["chkpt_path"], for_inference=True)
+    ) = build_model(config, device, model_path=model_path, for_inference=True)
     model.eval()
 
     # Create data loader for inference
@@ -1192,10 +1201,10 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
         )
 
     elif task == "classification":
-        final_metrics = compute_classification_metrics(metrics[split])
-        optimal_thresh = compute_optimal_threshold(split_y, split_yhat)
-        pred_labels = (split_yhat > optimal_thresh).astype(int)
         if config["num_classes"] <= 2:
+            final_metrics = compute_classification_metrics(metrics[split])
+            optimal_thresh = compute_optimal_threshold(split_y, split_yhat)
+            pred_labels = (split_yhat > optimal_thresh).astype(int)
             # Binary classification logging
             log_binary_classification_metrics_to_wandb(
                 split,
@@ -1210,14 +1219,17 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
             )
 
         else:
+            metrics_summary = compute_multiclass_metrics(metrics[split])
+
             # Multiclass classification logging
             log_multiclass_metrics_to_wandb(
                 split,
                 epoch_resume,
-                final_metrics,
+                metrics_summary,
                 labels_map,
                 split_y,
                 split_yhat,
+                0,
                 do_log=True,
             )
 
