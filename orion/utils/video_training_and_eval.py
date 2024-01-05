@@ -320,7 +320,8 @@ def setup_config(config, transforms, is_master):
     """
 
     config["transforms"] = transforms
-    config["output"] = config["output"] or generate_output_dir_name(config)
+    if ("output" not in config) or (config["output"] is None):
+        config["output"] = generate_output_dir_name(config)
     config["debug"] = config.get("debug", False)
     config["test_time_augmentation"] = config.get("test_time_augmentation", False)
     config["weighted_sampling"] = config.get("weighted_sampling", False)
@@ -333,7 +334,12 @@ def setup_config(config, transforms, is_master):
 
     if config["view_count"] is None:
         print("Loading with 1 view count for mean and std")
-        if (config["mean"] is None) or (config["std"] is None):
+        if (
+            ("mean" not in config)
+            or ("std" not in config)
+            or (config["mean"] is None)
+            or (config["std"] is None)
+        ):
             ## Load a datswet for normalization
             mean, std = orion.utils.get_mean_and_std(
                 orion.datasets.Video(
@@ -352,8 +358,13 @@ def setup_config(config, transforms, is_master):
             )
             print("Mean", mean)
             print("Std", std)
+
             config["mean"] = mean
             config["std"] = std
+            if is_master:
+                wandb.config.update(
+                    {"mean": config["mean"], "std": config["std"], "output": config["output"]}
+                )
         else:
             print("Using mean and std from config", config["mean"], config["std"])
 
@@ -502,37 +513,31 @@ def run_training_or_evaluate_orchestrator(
             # Update the best metrics for multi-class classification, handle logic for your use case
             mean_roc_auc_no_nan = metrics_summary["auc_weighted"]
             print(f"Mean ROC AUC score after removing NaNs: {mean_roc_auc_no_nan}")
-
+    print("final metrics", final_metrics)
     # Update and save checkpoints
-    best_loss, best_auc = update_and_save_checkpoints(
-        phase,
-        epoch,
-        loss,
-        mean_roc_auc_no_nan,
-        model,
-        optimizer,
-        scheduler,
-        config["output"],
-        wandb,
-        best_metrics["best_loss"],
-        best_metrics["best_auc"],
-        task,
-        do_log=do_log,
-    )
-    best_metrics["best_loss"] = best_loss
-    best_metrics["best_auc"] = best_auc
-
-    # Generate and save prediction dataframe
-    if phase == "val":
-        if do_log:
-            # print(y)
-            # print(yhat)
-            df_predictions = pd.DataFrame(
-                list(zip(filenames, y, yhat.squeeze())), columns=["filename", "y_true", "y_hat"]
+    if do_log:
+        best_loss, best_auc = update_and_save_checkpoints(
+            phase,
+            epoch,
+            loss,
+            mean_roc_auc_no_nan,
+            model,
+            optimizer,
+            scheduler,
+            config["output"],
+            wandb,
+            best_metrics["best_loss"],
+            best_metrics["best_auc"],
+            task,
+        )
+        best_metrics["best_loss"] = best_loss
+        best_metrics["best_auc"] = best_auc
+        print("best metrics", best_metrics)
+        # Generate and save prediction dataframe
+        if phase == "val":
+            df_predictions = save_predictions_to_csv(
+                filenames, y, task, phase, config, yhat.squeeze()
             )
-            print(config["output"])
-            filename = f"df_val_predictions_rank_{args.local_rank}.csv"
-            df_predictions.to_csv(os.path.join(config["output"], filename))
 
     return best_metrics
 
@@ -579,62 +584,65 @@ def update_and_save_checkpoints(
     best_loss,
     best_auc,
     task,
-    do_log=False,
 ):
-    if do_log:  ##Only if its the main process
-        """
-        Save the current checkpoint. Update the best checkpoint if the current performance is better.
+    """
+    Save the current checkpoint. Update the best checkpoint if the current performance is better.
 
-        Args:
-            phase (str): The current phase ('train' or 'val').
-            epoch (int): The current epoch number.
-            current_loss (float): The loss from the current epoch.
-            current_auc (float): The AUC from the current epoch, or None if not applicable.
-            model (torch.nn.Module): The model to be checkpointed.
-            optimizer (torch.optim.Optimizer): The optimizer to be checkpointed.
-            scheduler (any scheduler object): The scheduler to be checkpointed.
-            output (str): The directory where checkpoints are saved.
-            wandb (wandb object): The wandb logging object.
-            best_loss (float): The best loss recorded across all epochs for comparison.
-            best_auc (float): The best AUC recorded across all epochs for comparison.
-            task (str): The current task ('regression' or 'classification').
+    Args:
+        phase (str): The current phase ('train' or 'val').
+        epoch (int): The current epoch number.
+        current_loss (float): The loss from the current epoch.
+        current_auc (float): The AUC from the current epoch, or None if not applicable.
+        model (torch.nn.Module): The model to be checkpointed.
+        optimizer (torch.optim.Optimizer): The optimizer to be checkpointed.
+        scheduler (any scheduler object): The scheduler to be checkpointed.
+        output (str): The directory where checkpoints are saved.
+        wandb (wandb object): The wandb logging object.
+        best_loss (float): The best loss recorded across all epochs for comparison.
+        best_auc (float): The best AUC recorded across all epochs for comparison.
+        task (str): The current task ('regression' or 'classification').
 
-        Returns:
-            tuple: A tuple containing the possibly updated `best_loss` and `best_auc` values.
-        """
-        # Adjust the paths as needed
-        save_path = os.path.join(output, "checkpoint.pt")
-        best_path = os.path.join(output, "best.pt")
+    Returns:
+        tuple: A tuple containing the possibly updated `best_loss` and `best_auc` values.
+    """
+    # Adjust the paths as needed
+    save_path = os.path.join(output, "checkpoint.pt")
+    best_path = os.path.join(output, "best.pt")
 
-        # Always save the latest checkpoint
-        save_data = {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "loss": current_loss,
-            "best_loss": best_loss,
-            "auc": current_auc
-            if current_auc is not None
-            else -1,  # save with -1 if AUC is not applicable
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-        }
-        torch.save(save_data, save_path)
+    # Always save the latest checkpoint
+    save_data = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "loss": current_loss,
+        "best_loss": best_loss,
+        "auc": current_auc
+        if current_auc is not None
+        else -1,  # save with -1 if AUC is not applicable
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+    }
+    torch.save(save_data, save_path)
 
-        if phase == "val":
-            if task == "regression" and current_loss < best_loss:
+    if phase == "val":
+        if task == "regression" and current_loss < best_loss:
+            best_loss = current_loss
+            # Log and save only for regression since AUC is not relevant
+            wandb.run.summary["best_loss"] = best_loss
+            torch.save(save_data, best_path)
+            wandb.log({"best_val_loss": best_loss})
+        elif task == "classification":
+            if current_loss < best_loss:
+                print("best loss", current_loss)
                 best_loss = current_loss
-                # Log and save only for regression since AUC is not relevant
                 wandb.run.summary["best_loss"] = best_loss
-                torch.save(save_data, best_path)
                 wandb.log({"best_val_loss": best_loss})
-            elif task == "classification" and current_loss < best_loss:
-                best_loss = current_loss
+            if current_auc > best_auc:
+                print("best auc", best_auc)
                 best_auc = current_auc
-                # Log and save for classification since both loss and AUC are relevant
-                wandb.run.summary["best_loss"] = best_loss
                 wandb.run.summary["best_auc"] = best_auc
-                torch.save(save_data, best_path)
-                wandb.log({"best_val_loss": best_loss, "best_val_auc": best_auc})
+                wandb.log({"best_val_auc": best_auc})
+
+            torch.save(save_data, best_path)
 
     return best_loss, best_auc
 
@@ -733,26 +741,30 @@ def build_model(config, device, model_path=None, for_inference=False):
 
     # Add the new classification feature
     if config["task"] == "classification":
-        dataset = pd.read_csv(
-            os.path.join("../../data/", config["data_filename"]),
-            sep="µ",
-            engine="python",
-        )
-        # Initialize labels_map with None for each class index
-        labels_map = {i: None for i in range(config["num_classes"])}
+        try:
+            dataset = pd.read_csv(
+                os.path.join("../../data/", config["data_filename"]),
+                sep="µ",
+                engine="python",
+            )
+            # Initialize labels_map with None for each class index
+            labels_map = {i: None for i in range(config["num_classes"])}
 
-        # Update labels_map with actual labels from dataset
-        for int_label, label in zip(
-            dataset[config["target_label"]], dataset[config["label_loc_label"]]
-        ):
-            labels_map[int(int_label)] = label
+            # Update labels_map with actual labels from dataset
+            for int_label, label in zip(
+                dataset[config["target_label"]], dataset[config["label_loc_label"]]
+            ):
+                labels_map[int(int_label)] = label
 
-        print("Labels map before sorting:", labels_map)
+            print("Labels map before sorting:", labels_map)
 
-        # Optionally, sort the labels_map if needed
-        labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
+            # Optionally, sort the labels_map if needed
+            labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
 
-        print("Labels map after sorting:", labels_map)
+            print("Labels map after sorting:", labels_map)
+        except:
+            print("No label map")
+            labels_map = None
     else:
         labels_map = None
 
@@ -838,35 +850,36 @@ def load_data(split, config, transforms, weighted_sampling):
         return None, None
     else:
         kwargs = {
-            "target_label": config["target_label"],
+            "target_label": config.get("target_label", None),
             "mean": config["mean"],
             "std": config["std"],
             "length": config["frames"],
             "period": config["period"],
             "root": config["root"],
             "data_filename": config["data_filename"],
-            "datapoint_loc_label": config["datapoint_loc_label"],
+            "datapoint_loc_label": config.get("datapoint_loc_label", None),
             "apply_mask": config["apply_mask"],
             "resize": config["resize"],
-            "model_name": config["model_name"],
         }
-
-    if config["view_count"] is None:
-        dataset = orion.datasets.Video(
-            split=split,
-            video_transforms=transforms,
-            weighted_sampling=weighted_sampling,
-            debug=config["debug"],
-            **kwargs,
-        )
+    if split != "inference":
+        if config["view_count"] is None:
+            dataset = orion.datasets.Video(
+                split=split,
+                video_transforms=transforms,
+                weighted_sampling=weighted_sampling,
+                debug=config["debug"],
+                **kwargs,
+            )
+        else:
+            dataset = orion.datasets.Video_Multi(
+                split=split,
+                video_transforms=transforms,
+                weighted_sampling=weighted_sampling,
+                debug=False,
+                **kwargs,
+            )
     else:
-        dataset = orion.datasets.Echo_Multi(
-            split=split,
-            video_transforms=transforms,
-            weighted_sampling=weighted_sampling,
-            debug=False,
-            **kwargs,
-        )
+        dataset = orion.datasets.Video_inference(split=split, **kwargs)
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -874,9 +887,55 @@ def load_data(split, config, transforms, weighted_sampling):
         num_workers=config["num_workers"],
         shuffle=(split == "train"),
         pin_memory=(config["device"] == "cuda"),
-        drop_last=split != "test",
+        drop_last=(split != "test" and split != "inference"),
     )
     return dataloader, dataset
+
+
+def get_predictions(
+    model,
+    dataloader,
+    device,
+    config,
+    task,
+    use_amp=None,
+):
+    model.eval()  # Set the model to evaluation mode
+    predictions, filenames = [], []
+
+    with torch.no_grad():  # Disable gradient calculations
+        with tqdm.tqdm(total=len(dataloader)) as pbar:
+            for batch in dataloader:
+                data, fname = batch
+                data = data.to(device)
+                filenames.extend(fname)
+
+                # Handle non-4D data if block_size is provided
+                if (
+                    config.get("block_size") is not None and len(data.shape) == 5
+                ):  # assuming shape is (B, T, C, H, W)
+                    # Flatten the temporal and batch dimension to make data 4D
+                    if len(data.shape) == 5:  # Assuming shape is (B, T, C, H, W)
+                        batch_size, frames, channels, height, width = data.shape
+                        data = data.view(batch_size * frames, channels, height, width)
+
+                with torch.autocast(
+                    device_type=device.type, dtype=torch.float16, enabled=use_amp
+                ):
+                    outputs = model(data)  # Get model outputs
+
+                    # Process outputs for regression or classification tasks
+                    if task == "regression":
+                        predictions.extend(outputs.detach().view(-1).cpu().numpy())
+                    elif task == "classification":
+                        if outputs.dim() == 1:
+                            predictions.extend(torch.sigmoid(outputs).detach().cpu().numpy())
+                        else:
+                            predictions.extend(
+                                torch.softmax(outputs, dim=1).detach().cpu().numpy()
+                            )
+
+    return predictions, filenames
 
 
 def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
@@ -1130,9 +1189,9 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Use model_path from config, or default to config["output"] if model_path is None
-    model_path = config.get("model_path") or config["output"]
-    model_path = os.path.join(model_path, "best.pt")
-    print(model_path)
+    model_path = config.get("model_path", os.path.join(config["output"], "best.pt"))
+    print("model path", model_path)
+
     task = config.get("task", "regression")
     (
         model,
@@ -1147,97 +1206,124 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
 
     # Create data loader for inference
     split_dataloader, dataset = load_data(split, config, None, False)
-
-    (
-        split_loss,
-        split_yhat,
-        split_y,
-        filenames,
-    ) = orion.utils.video_training_and_eval.train_or_evaluate_epoch(
-        model,
-        split_dataloader,
-        is_training=False,
-        phase=split,
-        optimizer=None,
-        device=device,
-        epoch=epoch_resume,
-        task=task,
-        save_all=False,
-        weights=None,
-        scaler=None,
-        use_amp=True,
-        scheduler=None,
-        metrics=metrics,
-        config=config,
-    )
-    # print(split_yhat.shape)
-
-    # split_yhat = sync_tensor_across_gpus(split_yhat)
-    # split_y = sync_tensor_across_gpus(split_y)
-    # print(split_yhat.shape)
-
-    # Convert targets and predictions to numpy arrays for subsequent calculations
-    split_y = np.array(split_y)
-    split_yhat = np.array(split_yhat)
-
-    # Process the output according to the task type
-    if task == "regression":
-        # Compute final metrics for regression
-        # print("Current phase:", split)
-        # print("Available keys in metrics:", metrics.keys())
-        final_metrics = metrics[split].compute()
-        metrics[split].reset()
-
-        # Update the best metrics and get the current metrics
-        best_metrics, mae, mse, rmse = update_best_regression_metrics(
-            final_metrics, best_metrics[split]
+    if split != "inference":
+        (
+            split_loss,
+            split_yhat,
+            split_y,
+            filenames,
+        ) = orion.utils.video_training_and_eval.train_or_evaluate_epoch(
+            model,
+            split_dataloader,
+            is_training=False,
+            phase=split,
+            optimizer=None,
+            device=device,
+            epoch=epoch_resume,
+            task=task,
+            save_all=False,
+            weights=None,
+            scaler=None,
+            use_amp=True,
+            scheduler=None,
+            metrics=metrics,
+            config=config,
         )
 
-        # Log regression metrics
-        log_regression_metrics_to_wandb(split, final_metrics, split_loss, 0)
-        # Plot regression graphics
-        plot_regression_graphics(
-            split_y, split_yhat, split, epoch, config["binary_threshold"], config
+        # Convert targets and predictions to numpy arrays for subsequent calculations
+        split_y = np.array(split_y)
+        split_yhat = np.array(split_yhat)
+
+        # Process the output according to the task type
+        if task == "regression":
+            # Compute final metrics for regression
+            # print("Current phase:", split)
+            # print("Available keys in metrics:", metrics.keys())
+            final_metrics = metrics[split].compute()
+            metrics[split].reset()
+
+            # Update the best metrics and get the current metrics
+            best_metrics, mae, mse, rmse = update_best_regression_metrics(
+                final_metrics, best_metrics[split]
+            )
+
+            # Log regression metrics
+            log_regression_metrics_to_wandb(split, final_metrics, split_loss, 0)
+            # Plot regression graphics
+            plot_regression_graphics(
+                split_y, split_yhat, split, epoch, config["binary_threshold"], config
+            )
+
+        elif task == "classification":
+            if config["num_classes"] <= 2:
+                final_metrics = compute_classification_metrics(metrics[split])
+                optimal_thresh = compute_optimal_threshold(split_y, split_yhat)
+                pred_labels = (split_yhat > optimal_thresh).astype(int)
+                # Binary classification logging
+                log_binary_classification_metrics_to_wandb(
+                    split,
+                    epoch_resume,
+                    split_loss,
+                    final_metrics["auc"],
+                    optimal_thresh,
+                    split_y,
+                    pred_labels,
+                    labels_map,
+                    do_log=True,
+                )
+
+            else:
+                metrics_summary = compute_multiclass_metrics(metrics[split])
+
+                # Multiclass classification logging
+                log_multiclass_metrics_to_wandb(
+                    split,
+                    epoch_resume,
+                    metrics_summary,
+                    labels_map,
+                    split_y,
+                    split_yhat,
+                    0,
+                    do_log=True,
+                )
+    else:
+        split_yhat, filenames = get_predictions(
+            model,
+            split_dataloader,
+            device,
+            config,
+            task,
+            use_amp=True,
+        )
+        split_y = None
+    df_predictions = save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y)
+    return df_predictions
+
+
+def save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y=None):
+    if split_y is not None:
+        # If split_y is provided, include it in the DataFrame
+        data = list(zip(filenames, split_y, split_yhat))
+        df_predictions = pd.DataFrame(data, columns=["filename", "y_true", "y_hat"])
+    else:
+        # If split_y is None, create DataFrame without the y_true column
+        data = list(zip(filenames, split_yhat))
+        df_predictions = pd.DataFrame(data, columns=["filename", "y_hat"])
+
+    if task == "classification":
+        try:
+            df_predictions["y_hat"] = df_predictions["y_hat"].apply(
+                lambda x: np.fromstring(x.strip("[]"), sep=" ")
+            )
+        except:
+            print("Error converting string to array. Check if the y_hat column is a string.")
+
+        df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
+            lambda x: np.argmax(x).astype(int)
         )
 
-    elif task == "classification":
-        if config["num_classes"] <= 2:
-            final_metrics = compute_classification_metrics(metrics[split])
-            optimal_thresh = compute_optimal_threshold(split_y, split_yhat)
-            pred_labels = (split_yhat > optimal_thresh).astype(int)
-            # Binary classification logging
-            log_binary_classification_metrics_to_wandb(
-                split,
-                epoch_resume,
-                split_loss,
-                final_metrics["auc"],
-                optimal_thresh,
-                split_y,
-                pred_labels,
-                labels_map,
-                do_log=True,
-            )
-
-        else:
-            metrics_summary = compute_multiclass_metrics(metrics[split])
-
-            # Multiclass classification logging
-            log_multiclass_metrics_to_wandb(
-                split,
-                epoch_resume,
-                metrics_summary,
-                labels_map,
-                split_y,
-                split_yhat,
-                0,
-                do_log=True,
-            )
-
-    df_predictions = pd.DataFrame(
-        list(zip(filenames, split_y, split_yhat)),
-        columns=["filename", "y_true", "y_hat"],
-    )
-    df_predictions.to_csv(os.path.join(config["output"], f"{split}_predictions.csv"))
+    output_path = os.path.join(config["output"], f"{split}_predictions.csv")
+    df_predictions.to_csv(output_path)
 
     return df_predictions
 

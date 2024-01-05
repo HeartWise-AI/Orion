@@ -1,12 +1,9 @@
 num_epochs: 50
 model_name: swin3d_s
 model_path: null
-data_filename: /volume/Orion/data/DeepCORO_ALGO1_ObjectRecong_with_CathEF_UCSF_MHI_dataset_train_test_dev_NAS_path_mu.csv
+data_filename: /volume/DeepCORO/data/2017-2022_CathReport_sample_100_mu.csv
 root: "."
-target_label: object_pred
 datapoint_loc_label: FileName
-label_loc_label: y_true_cat
-binary_threshold: 40.00
 use_amp: true
 frames: 32
 device: cuda
