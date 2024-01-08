@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import tqdm
+import zarr
 
 
 class RMSELoss(torch.nn.Module):
@@ -68,17 +69,17 @@ def loadvideo(filename: str) -> np.ndarray:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             v[count] = frame
 
-        vid = v.transpose((0, 3, 1, 2))
+        vid = v.transpose((0, 3, 1, 2))  ##
 
     elif file_extension == ".zarr":
         data = zarr.open(filename, mode="r", synchronizer=zarr.ThreadSynchronizer())
         vid = np.array(data.video)  # (64, 128, 128)
-        vid = np.stack((vid,) * 3, axis=1)
-
+        vid = np.transpose(vid, (1, 2, 0))  # Change shape to (128, 128, 64)
+        vid = np.stack((vid,) * 3, axis=-1)  # Change shape to (128, 128, 64, 3)
+        # Reshape the video to (64, 3, 128, 128)
+        vid = np.transpose(vid, (2, 3, 0, 1))  # Change shape to (64, 3, 128, 128)
     else:
         raise ValueError(f"Unsupported file extension: {file_extension}")
-
-    return vid
 
     return vid
 

@@ -1,29 +1,28 @@
 ## Orion Video Training and Evaluation
 
 Orion is a Python-based application designed for video training and evaluation tasks. It supports both regression and classification tasks, and can be used with a variety of models.
+
 ## Setup
 
+1. Ensure you have Python 3.10 or later installed.
+1. It is recommended to use Conda and create a new environemnt as such : `conda create -n orion python=3.10 anaconda`
+1. `conda activate orion`
+1. Install Poetry, a Python package manager. You can do this by running the following commands:
 
+`python3 -m pip install --user pipx python3 -m pipx ensurepath pipx install poetry`
 
-1. Ensure you have Python 3.10 or later installed. Ensure you have an account on wandb.ai and that you logged in used `wandb login`
-2. It is recommended to use Conda and create a new environemnt as such : `conda create -n orion python=3.10 anaconda`
-3. `conda activate orion`
-4. Install Poetry, a Python package manager. You can do this by running the following commands:
+Then `poetry install`
 
-```
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
-pipx install poetry
-```
+This will install all dependencies in your LOCAL environment.
 
-Then `poetry install` 
-
-This will install all dependencies in your LOCAL environment. 
+5. Ensure you have an account on wandb.ai and that you logged in used `wandb login`
 
 ## Usage
 
 You can use Orion either through a Python script or directly in a Jupyter notebook.
+
 ### Configuration file example
+
 See `/config/` for different config.YAML file examples.
 
 ```
@@ -78,16 +77,15 @@ See `/config/` for different config.YAML file examples.
 
 1. Prepare your configuration file in YAML format. This should include all the necessary parameters for your task, such as the task type, model name, number of epochs, batch size, and more. An example configuration file is provided in notebooks/config/config.yaml.
 
-2. Run the main script with torchrun, passing the path to your Python script and the path to your configuration file as arguments. Here is an example command:
+1. Run the main script with torchrun, passing the path to your Python script and the path to your configuration file as arguments. Here is an example command:
 
-`torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config notebooks/config/config.yaml` 
+`torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config notebooks/config/config.yaml`
 
 ### Using a Jupyter Notebook
 
-
 1. Prepare your configuration file in YAML format as described above.
 
-2. In your Jupyter notebook, import the necessary modules and set up your environment variables:
+1. In your Jupyter notebook, import the necessary modules and set up your environment variables:
 
 ```
 from orion.utils import video_training_and_eval
@@ -100,7 +98,6 @@ os.environ['MASTER_ADDR'] = 'localhost'
 os.environ['MASTER_PORT'] = '12355'
 ```
 
-
 3. Define a class for your command-line arguments:
 
 ```
@@ -111,7 +108,6 @@ class Args:
         self.epochs = 2
         self.batch = 32
 ```
-
 
 4. Load your configuration from the YAML file, create the transforms, initialize a wandb run if logging, and run the main process:
 
@@ -128,14 +124,12 @@ video_training_and_eval.execute_run(config_defaults=config_defaults, transforms=
 
 1. Prepare your configuration file in YAML format as described above. Additionally, prepare a sweep configuration file in YAML format. This file should reference the initial model configuration file and include additional sweep parameters. An example sweep configuration file is provided in notebooks/config/sweep_config.yaml.
 
-2. In your Jupyter notebook, import the necessary modules:
+1. In your Jupyter notebook, import the necessary modules:
 
 ```
 import wandb
 import yaml
 ```
-
-
 
 3. Define a function to load your YAML configuration:
 
@@ -144,8 +138,6 @@ def load_yaml_config(file_path):
     with open(file_path, 'r') as file:
         return yaml.safe_load(file)
 ```
-
-
 
 4. Load your sweep configuration from the YAML file, create a sweep with wandb, and run the sweep agent:
 
@@ -160,8 +152,6 @@ wandb.agent(
 )
 ```
 
-
 ### Note
 
 This application uses distributed training, so it is designed to be run on multiple GPUs. If you are running it on a machine with a single GPU or CPU, you may need to modify the code accordingly.
-
