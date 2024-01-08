@@ -905,7 +905,7 @@ def get_predictions(
 
     with torch.no_grad():  # Disable gradient calculations
         with tqdm.tqdm(total=len(dataloader)) as pbar:
-            for batch in dataloader:
+            for i, batch in enumerate(dataloader):
                 data, fname = batch
                 data = data.to(device)
                 filenames.extend(fname)
@@ -914,10 +914,8 @@ def get_predictions(
                 if (
                     config.get("block_size") is not None and len(data.shape) == 5
                 ):  # assuming shape is (B, T, C, H, W)
-                    # Flatten the temporal and batch dimension to make data 4D
-                    if len(data.shape) == 5:  # Assuming shape is (B, T, C, H, W)
-                        batch_size, frames, channels, height, width = data.shape
-                        data = data.view(batch_size * frames, channels, height, width)
+                    batch_size, frames, channels, height, width = data.shape
+                    data = data.view(batch_size * frames, channels, height, width)
 
                 with torch.autocast(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
@@ -934,6 +932,11 @@ def get_predictions(
                             predictions.extend(
                                 torch.softmax(outputs, dim=1).detach().cpu().numpy()
                             )
+
+                pbar.update()  # Ensure this is correctly indented
+                pbar.set_description(
+                    f"Processing batch {i+1}/{len(dataloader)}"
+                )  # Optional: set a manual description
 
     return predictions, filenames
 

@@ -73,8 +73,6 @@ def loadvideo(filename: str) -> np.ndarray:
     elif file_extension == ".zarr":
         data = zarr.open(filename, mode="r", synchronizer=zarr.ThreadSynchronizer())
         vid = np.array(data.video)  # (64, 128, 128)
-        ##TODO : @Elodie - peut être enlever cette ligne
-        vid = (vid - vid.min()) * 255 / (vid.max() - vid.min())
         vid = np.stack((vid,) * 3, axis=1)
 
     else:
@@ -85,7 +83,7 @@ def loadvideo(filename: str) -> np.ndarray:
     return vid
 
 
-def savevideo(filename: str, array: np.ndarray, fps: typing.Union[float, int] = 1):
+def savevideo(filename: str, array: np.ndarray, fps: float | int = 1):
     """
     ---------------------------------------------------------------------------------
     Purpose:
@@ -172,7 +170,7 @@ def get_mean_and_std(
     if samples is not None and len(dataset) > samples:
         indices = np.random.choice(len(dataset), samples, replace=False)
         dataset = torch.utils.data.Subset(dataset, indices)
-        
+
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True
     )
@@ -181,7 +179,7 @@ def get_mean_and_std(
     s1 = 0.0  # sum of elements along channels (ends up as np.array of dimension (channels,))
     s2 = 0.0  # sum of squares of elemenzts along channels (ends up as np.array of dimension (channels,))
     # pdb.set_trace()
-    for (x, *_) in tqdm.tqdm(dataloader):
+    for x, *_ in tqdm.tqdm(dataloader):
         # pdb.set_trace()
         x = x.transpose(0, 1).contiguous().view(3, -1)
         n += x.shape[1]
@@ -249,7 +247,7 @@ def multi_get_mean_and_std(
     s1 = 0.0  # sum of elements along channels (ends up as np.array of dimension (channels,))
     s2 = 0.0  # sum of squares of elements along channels (ends up as np.array of dimension (channels,))
 
-    for (x, *_) in tqdm.tqdm(dataloader):
+    for x, *_ in tqdm.tqdm(dataloader):
         x = torch.stack(x)
         x = x.transpose(1, 2)
         x = x.contiguous().view(3, -1)

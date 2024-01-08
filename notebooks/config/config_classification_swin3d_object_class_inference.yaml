@@ -1,7 +1,7 @@
 num_epochs: 50
 model_name: swin3d_s
 model_path: null
-data_filename: /volume/DeepCORO/data/2017-2022_CathReport_sample_100_mu.csv
+data_filename: /volume/DeepCORO/data/2017-2022_CathReport_recoded_stenosis_percentages.csv_metadata_extracted_mu.csv
 root: "."
 datapoint_loc_label: FileName
 use_amp: true
@@ -13,7 +13,7 @@ seed: 0
 optimizer: RAdam
 weight_decay: 0.0001
 num_workers: 8
-batch_size: 5
+batch_size: 10
 lr: 0.0001
 label_smoothing: null
 label_smoothing_value: null
