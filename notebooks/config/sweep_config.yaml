@@ -10,15 +10,17 @@ parameters:
     values: ["swin3d_s"]
   lr:
     distribution: "uniform"
-    min: 1e-5
-    max: 1e-3
+    min: 1e-8
+    max: 2e-5
   rand_augment:
     values: [True, False]
+  scheduler_type:
+    values: ["plateau", "step", "cosine_warm_restart"]
   optimizer:
-    values: ["AdamW", "Adam", "RAdam"]
+    values: ["AdamW", "RAdam"]
   weight_decay:
     min: 0.0  # explicitly a float
-    max: 0.001  # explicitly a float, equivalent to 1e-3
+    max: 0.00001  # explicitly a float, equivalent to 1e-3
   patience:
     min: 5
     max: 15

@@ -58,12 +58,24 @@ torch.set_float32_matmul_precision("high")
 
 
 def execute_run(config_defaults=None, transforms=None, args=None, run=None):
+    """
+    Executes the training and evaluation process for a given configuration.
+
+    Args:
+        config_defaults (dict): Default configuration values.
+        transforms (list): List of data transforms.
+        args (argparse.Namespace): Command-line arguments.
+        run (wandb.Run): WandB run object for logging.
+
+    Returns:
+        None
+    """
     torch.cuda.empty_cache()
     # Check to see if local_rank is 0
     is_master = args.local_rank == 0
     print("is_master", is_master)
 
-    config = setup_config(config_defaults, transforms, is_master)
+    config = setup_config(config_defaults, transforms, is_master, run=run)
     use_amp = config.get("use_amp", False)
     print("Using AMP", use_amp)
     task = config.get("task", "regression")
@@ -129,42 +141,40 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     )
     val_loader, val_dataset = load_data("val", config, transforms, config["weighted_sampling"])
 
-    # Set up dataloaders for weighted_sampling
-    if config["weighted_sampling"] == True:
-        print("Using weighted sampling")
-        train_sampler = WeightedRandomSampler(
-            train_dataset.weight_list,
-            num_samples=len(train_dataset),
-            replacement=True,
+    # Simplified DataLoader setup
+    def create_dataloader(dataset, sampler_type, batch_size, num_workers, pin_memory, drop_last):
+        sampler = sampler_type(dataset)
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            sampler=sampler,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
         )
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=config["batch_size"],
-            num_workers=config["num_workers"],
-            sampler=train_sampler,
-            pin_memory=(device.type == "cuda"),
-            drop_last=True,
-        )
-    else:
-        print("Using updated train sampler distributed")
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=config["batch_size"],
-            num_workers=config["num_workers"],
-            sampler=train_sampler,
-            pin_memory=(device.type == "cuda"),
-            drop_last=True,
-        )
-        val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=config["batch_size"],
-            num_workers=config["num_workers"],
-            sampler=val_sampler,
-            pin_memory=(device.type == "cuda"),
-            drop_last=True,
-        )
+
+    train_sampler_type = (
+        WeightedRandomSampler
+        if config["weighted_sampling"]
+        else torch.utils.data.distributed.DistributedSampler
+    )
+    train_loader = create_dataloader(
+        train_dataset,
+        train_sampler_type,
+        config["batch_size"],
+        config["num_workers"],
+        device.type == "cuda",
+        True,
+    )
+    val_sampler_type = torch.utils.data.distributed.DistributedSampler
+    val_loader = create_dataloader(
+        val_dataset,
+        val_sampler_type,
+        config["batch_size"],
+        config["num_workers"],
+        device.type == "cuda",
+        True,
+    )
 
     dataloaders = {"train": train_loader, "val": val_loader}
     datasets = {"train": train_dataset, "val": val_dataset}
@@ -260,7 +270,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             },
         }
         for split in ["val", "test"]:
-            if do_log == True:
+            if do_log:
                 # Configure datasets for validation and testing splits
                 perform_inference(split, config, metrics, best_metrics)
 
@@ -300,7 +310,7 @@ def sync_tensor_across_gpus(t: torch.Tensor | None) -> torch.Tensor | None:
     return torch.cat(gather_t_tensor, dim=0)
 
 
-def setup_config(config, transforms, is_master):
+def setup_config(config, transforms, is_master, run):
     """
     Sets up the configuration settings for training or evaluation.
 
@@ -320,8 +330,6 @@ def setup_config(config, transforms, is_master):
     """
 
     config["transforms"] = transforms
-    if ("output" not in config) or (config["output"] is None):
-        config["output"] = generate_output_dir_name(config)
     config["debug"] = config.get("debug", False)
     config["test_time_augmentation"] = config.get("test_time_augmentation", False)
     config["weighted_sampling"] = config.get("weighted_sampling", False)
@@ -329,7 +337,13 @@ def setup_config(config, transforms, is_master):
 
     # Define device
     if is_master:
+        run_id = wandb.run.id
+        print("Run id", run_id)
+        config["run_id"] = run_id
+        if ("output" not in config) or (config["output"] is None):
+            config["output"] = generate_output_dir_name(config, run_id=run_id)
         pathlib.Path(config["output"]).mkdir(parents=True, exist_ok=True)
+        wandb.config.update(config, allow_val_change=True)
         print("output_folder created", config["output"])
 
     if config["view_count"] is None:
@@ -536,13 +550,13 @@ def run_training_or_evaluate_orchestrator(
         # Generate and save prediction dataframe
         if phase == "val":
             df_predictions = save_predictions_to_csv(
-                filenames, y, task, phase, config, yhat.squeeze()
+                filenames, yhat.squeeze(), task, phase, config, y
             )
 
     return best_metrics
 
 
-def generate_output_dir_name(config):
+def generate_output_dir_name(config, run_id):
     import time
 
     """
@@ -550,6 +564,7 @@ def generate_output_dir_name(config):
 
     Args:
         config (dict): The configuration dictionary containing training parameters.
+        run_id (str): The ID of the current run.
 
     Returns:
         str: The generated directory name for saving output.
@@ -560,13 +575,14 @@ def generate_output_dir_name(config):
     # Extract relevant information from the config
     mname = config.get("model_name", "unknown_model")
     bsize = config.get("batch_size", "batch_size")
+    run_id = config.get("run_id", "run_id")
     fr = config.get("frames", "frames")
     prd = config.get("period", "period")
     optimizer = config.get("optimizer", "optimizer")
     resume = "resume" if config.get("resume", False) else "new"
 
     # Create directory name by joining the individual components with underscores
-    dir_name = f"{mname}_{bsize}_{fr}_{prd}_{optimizer}_{resume}_{current_time}"
+    dir_name = f"{mname}_{bsize}_{fr}_{prd}_{optimizer}_{resume}_{current_time}_{run_id}"
 
     return dir_name
 
@@ -1001,10 +1017,12 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
             optim, config["lr_step_period"], config["factor"]
         )
     elif config["scheduler_type"] == "cosine_warm_restart":
+        print("epoch", epoch_resume)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optim,
+            T_0=10,
             verbose=True,
-            last_epoch=epoch_resume,
+            last_epoch=(epoch_resume - 1),
         )
     else:
         scheduler = None
@@ -1183,7 +1201,10 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
     Perform inference using the specified model and data based on the provided configuration.
 
     Args:
+        split (str): The split name for inference.
         config (dict): Configuration dictionary containing model and dataset parameters.
+        metrics (dict, optional): Dictionary of metrics objects for evaluation. Defaults to None.
+        best_metrics (dict, optional): Dictionary of best metrics values. Defaults to None.
 
     Returns:
         dict: Dictionary of predictions.
@@ -1304,6 +1325,8 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
 
 
 def save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y=None):
+    # The above code is checking if the variable `split_y` is not equal to `None`. If it is not
+    # `None`, then the code inside the `if` statement will be executed.
     if split_y is not None:
         # If split_y is provided, include it in the DataFrame
         data = list(zip(filenames, split_y, split_yhat))
@@ -1351,6 +1374,16 @@ def create_transforms(config):
 
 
 def setup_run(args, config_defaults):
+    """
+    Set up the run for training or evaluation.
+
+    Args:
+        args: The command line arguments.
+        config_defaults: The default configuration values.
+
+    Returns:
+        The run object for logging with wandb or None if not running on rank 0.
+    """
     if args.local_rank == 0:
         run = wandb.init(
             entity=config_defaults["entity"],
@@ -1396,6 +1429,11 @@ def update_config(config, additional_args):
 
 
 def main():
+    """
+    Entry point of the program.
+    Parses command line arguments, loads configuration file, updates configuration with additional arguments,
+    sets up logging, creates transforms, and executes the main training and evaluation process.
+    """
     import os
 
     import yaml

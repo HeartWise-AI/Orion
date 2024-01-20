@@ -1,7 +1,7 @@
 num_epochs: 50
 model_name: swin3d_s
 model_path: null
-data_filename: /volume/DeepCORO/data/2017-2022_CathReport_recoded_stenosis_percentages.csv_metadata_extracted_mu.csv
+data_filename: /volume/DeepCORO/data/2017-2022_CathReport_recoded_stenosis_percentages_20240106.csv_metadata_extracted_mu.csv
 root: "."
 datapoint_loc_label: FileName
 use_amp: true
@@ -43,11 +43,3 @@ metrics_control:
   plot_metrics_moving_thresh: true
   n_bootstrap: 100
   q_bootstrap: 0.05
-transforms:
-  - transform: RandomAffine
-    params:
-      degrees: 30
-      translate: [0.0, 0.1]
-      scale: [0.9, 1.1]
-      shear: [0, 20]
-      fill: null
