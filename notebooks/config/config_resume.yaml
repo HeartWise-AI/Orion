@@ -15,7 +15,6 @@ device: cuda
 period: 2
 pretrained: false
 output: null
-n_train_patients: null
 seed: 0
 optimizer: RAdam
 weight_decay: 0.0001

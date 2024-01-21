@@ -15,16 +15,12 @@ device: cuda
 period: 2
 pretrained: false
 output: null
-n_train_patients: null
 seed: 0
 optimizer: RAdam
 weight_decay: 0.0003845182987994549
 num_workers: 8
 batch_size: 5
 lr: 0.00002786988178725705
-label_smoothing: null
-label_smoothing_value: null
-class_weights: null
 loss: l1_loss
 task: regression
 num_classes: 1

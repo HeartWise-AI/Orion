@@ -25,7 +25,16 @@ import tqdm
 
 import orion
 from orion.datasets import Video
-from orion.models import movinet, pyvid_multiclass_x3d, stam, timesformer, vivit, x3d, x3d_multi
+from orion.models import (
+    movinet,
+    pyvid_multiclass_x3d,
+    stam,
+    timesformer,
+    vivit,
+    x3d,
+    x3d_legacy,
+    x3d_multi,
+)
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
 from orion.utils.plot import (
@@ -714,6 +723,9 @@ def build_model(config, device, model_path=None, for_inference=False):
 
     if config["model_name"] == "x3d":
         model = x3d(num_classes=config["num_classes"], task=config["task"])
+    elif config["model_name"] == "x3d_legacy":
+        print("Using legacy X3d model with extra regression fc2 layer")
+        model = x3d_legacy(num_classes=config["num_classes"], task=config["task"])
     elif config["model_name"] == "pyvid_multiclass_x3d":
         model = pyvid_multiclass_x3d(num_classes=config["num_classes"], resize=config["resize"])
     elif config["model_name"] == "timesformer":
@@ -812,11 +824,17 @@ def build_model(config, device, model_path=None, for_inference=False):
             checkpoint = torch.load(model_path)
         # Uncomment below to debug checkpoint content
         # print("Model checkpoint content:", checkpoint)
-
-        model_state_dict = checkpoint["model_state_dict"]
-        torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
-            model_state_dict, "_orig_mod.module."
-        )
+        try:
+            model_state_dict = checkpoint["model_state_dict"]
+            torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+                model_state_dict, "_orig_mod.module."
+            )
+        except:
+            print("Using legacy state dict")
+            model_state_dict = checkpoint["state_dict"]
+            torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+                model_state_dict, "module."
+            )
 
         model.load_state_dict(model_state_dict)
         model.to(device)

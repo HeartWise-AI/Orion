@@ -12,6 +12,7 @@ from orion.models.config import _C
 from orion.models.feature_model import get_fmodel
 from orion.models.movinet_model import MoViNet
 from orion.models.vivit import ViViT
+from orion.models.x3d_legacy import X3D_legacy
 from orion.models.x3d_multi import X3D_multi
 
 
@@ -400,6 +401,14 @@ def x3d_multi(num_classes, **kwargs):
     """Constructs an X3D_multi model."""
     model = X3D_multi(
         Bottleneck, get_blocks("M"), get_inplanes("M"), num_classes=num_classes, **kwargs
+    )
+    return model
+
+
+def x3d_legacy(num_classes, **kwargs):
+    """Constructs an X3D model."""
+    model = X3D_legacy(
+        Bottleneck, get_blocks("M"), get_inplanes("M"), n_classes=num_classes, **kwargs
     )
     return model
 
