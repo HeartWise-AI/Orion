@@ -96,8 +96,8 @@ class Video_inference(torch.utils.data.Dataset):
         if not isinstance(target_label, list):
             target_label = [target_label]
         self.target_label = target_label
-        self.mean = mean
-        self.std = std
+        self.mean = format_mean_std(mean)
+        self.std = format_mean_std(std)
         self.length = length
         self.max_length = max_length
         self.period = period
@@ -199,7 +199,6 @@ class Video_inference(torch.utils.data.Dataset):
         video = torch.from_numpy(video)
         if self.resize is not None:
             video = v2.Resize((self.resize, self.resize), antialias=None)(video)
-
         #       apply normalization before augmentaiton per riselab and pytorchvideo
         video = v2.Normalize(self.mean, self.std)(video)
         #         pdb.set_trace()
@@ -626,3 +625,55 @@ def _defaultdict_of_lists():
     """
 
     return collections.defaultdict(list)
+
+
+def format_mean_std(input_value):
+    """
+    Formats the mean or std value to a list of floats.
+
+    Args:
+        input_value (str, list, np.array): The input mean/std value.
+
+    Returns:
+        list: A list of floats.
+
+    Raises:
+        ValueError: If the input cannot be converted to a list of floats.
+    """
+
+    if input_value is 1.0 or input_value is 0.0:
+        print("Mean/STD value is not defined")
+        return input_value
+
+    # Check if input is a list with a single string element
+    if (
+        isinstance(input_value, list)
+        and len(input_value) == 1
+        and isinstance(input_value[0], str)
+    ):
+        # Extract the string from the list and process it
+        input_value = input_value[0]
+
+    if isinstance(input_value, str):
+        # Remove any brackets or extra whitespace and split the string
+        cleaned_input = (
+            input_value.replace("[", "").replace("]", "").strip().replace("’", "").split()
+        )
+        try:
+            # Convert the split string values to float
+            formatted_value = [float(val) for val in cleaned_input]
+        except ValueError:
+            raise ValueError("String input for mean/std must be space-separated numbers.")
+    elif isinstance(input_value, (list, np.ndarray)):
+        try:
+            # Convert elements to float
+            formatted_value = [float(val) for val in input_value]
+        except ValueError:
+            raise ValueError("List or array input for mean/std must contain numbers.")
+    else:
+        raise TypeError("Input for mean/std must be a string, list, or numpy array.")
+
+    if len(formatted_value) != 3:
+        raise ValueError("Mean/std must have exactly three elements (for RGB channels).")
+
+    return formatted_value

@@ -44,7 +44,7 @@ from orion.utils.plot import (
     plot_multiclass_confusion,
     plot_multiclass_rocs,
     plot_preds_distribution,
-    plot_regression_graphics,
+    plot_regression_graphics_and_log_binarized_to_wandb,
     update_best_regression_metrics,
     update_classification_metrics,
 )
@@ -178,7 +178,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     dataloaders = {"train": train_loader, "val": val_loader}
     datasets = {"train": train_dataset, "val": val_dataset}
-    samplers = {"train": train_sampler, "val": val_sampler}
+    samplers = {"train": train_sampler_type, "val": val_sampler_type}
 
     if not dataloaders["train"] or not dataloaders["val"]:
         raise ValueError("Train or validation set is empty")
@@ -493,7 +493,9 @@ def run_training_or_evaluate_orchestrator(
         if do_log:
             log_regression_metrics_to_wandb(phase, final_metrics, loss, learning_rate)
 
-            plot_regression_graphics(y, yhat, phase, epoch, config["binary_threshold"], config)
+            plot_regression_graphics_and_log_binarized_to_wandb(
+                y, yhat, phase, epoch, config["binary_threshold"], config
+            )
 
             best_metrics, mae, mse, rmse = update_best_regression_metrics(
                 final_metrics, best_metrics
@@ -877,6 +879,7 @@ def load_data(split, config, transforms, weighted_sampling):
             "apply_mask": config["apply_mask"],
             "resize": config["resize"],
         }
+
     if split != "inference":
         if config["view_count"] is None:
             dataset = orion.datasets.Video(
@@ -1201,7 +1204,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
     Perform inference using the specified model and data based on the provided configuration.
 
     Args:
-        split (str): The split name for inference.
+        split (str): The split name for inference. If inference, it will not save it to WANDB and run the metrics.
         config (dict): Configuration dictionary containing model and dataset parameters.
         metrics (dict, optional): Dictionary of metrics objects for evaluation. Defaults to None.
         best_metrics (dict, optional): Dictionary of best metrics values. Defaults to None.
@@ -1230,6 +1233,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
 
     # Create data loader for inference
     split_dataloader, dataset = load_data(split, config, None, False)
+
     if split != "inference":
         (
             split_loss,
@@ -1274,8 +1278,8 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
             # Log regression metrics
             log_regression_metrics_to_wandb(split, final_metrics, split_loss, 0)
             # Plot regression graphics
-            plot_regression_graphics(
-                split_y, split_yhat, split, epoch, config["binary_threshold"], config
+            plot_regression_graphics_and_log_binarized_to_wandb(
+                split_y, split_yhat, split, epoch_resume, config["binary_threshold"], config
             )
 
         elif task == "classification":
@@ -1311,6 +1315,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
                     do_log=True,
                 )
     else:
+        print("Performing inference only on new dataset. No WANDB logging")
         split_yhat, filenames = get_predictions(
             model,
             split_dataloader,
@@ -1320,6 +1325,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
             use_amp=True,
         )
         split_y = None
+
     df_predictions = save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y)
     return df_predictions
 

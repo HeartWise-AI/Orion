@@ -161,7 +161,9 @@ def plot_multiclass_confusion(conf_mat, save_dir=None, tag="test"):
     plt.show()
 
 
-def plot_regression_graphics(y, yhat, phase, epoch, binary_threshold, config):
+def plot_regression_graphics_and_log_binarized_to_wandb(
+    y, yhat, phase, epoch, binary_threshold, config
+):
     import sklearn
 
     # Generate binary metrics
