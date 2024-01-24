@@ -24,7 +24,7 @@ You can use Orion either through a Python script or directly in a Jupyter notebo
 
 ### Configuration file example
 
-See `/config/` for different config.YAML file examples.
+See `notebooks/config/` for different config.YAML file examples.
 
 ```
 - num_epochs: The number of epochs for training.
