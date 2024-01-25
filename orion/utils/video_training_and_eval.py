@@ -153,13 +153,16 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     # Simplified DataLoader setup
     def create_dataloader(dataset, sampler_type, batch_size, num_workers, pin_memory, drop_last):
         sampler = sampler_type(dataset)
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            sampler=sampler,
-            pin_memory=pin_memory,
-            drop_last=drop_last,
+        return (
+            torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                sampler=sampler,
+                pin_memory=pin_memory,
+                drop_last=drop_last,
+            ),
+            sampler,
         )
 
     train_sampler_type = (
@@ -167,7 +170,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         if config["weighted_sampling"]
         else torch.utils.data.distributed.DistributedSampler
     )
-    train_loader = create_dataloader(
+
+    train_loader, train_sampler = create_dataloader(
         train_dataset,
         train_sampler_type,
         config["batch_size"],
@@ -176,7 +180,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         True,
     )
     val_sampler_type = torch.utils.data.distributed.DistributedSampler
-    val_loader = create_dataloader(
+    val_loader, val_sampler = create_dataloader(
         val_dataset,
         val_sampler_type,
         config["batch_size"],
@@ -184,10 +188,9 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         device.type == "cuda",
         True,
     )
-
-    dataloaders = {"train": train_loader, "val": val_loader}
     datasets = {"train": train_dataset, "val": val_dataset}
-    samplers = {"train": train_sampler_type, "val": val_sampler_type}
+    dataloaders = {"train": train_loader, "val": val_loader}
+    samplers = {"train": train_sampler, "val": val_sampler}
 
     if not dataloaders["train"] or not dataloaders["val"]:
         raise ValueError("Train or validation set is empty")
