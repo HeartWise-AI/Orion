@@ -209,7 +209,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             "val": initialize_classification_metrics(num_classes, device),
             "test": initialize_classification_metrics(num_classes, device),
         }
-        class_weights = config["class_weights"]
+        class_weights = config.get("class_weights", None)
+
         if config["class_weights"] is None:
             print("Not using weighted sampling and not using class weights specified in config")
             weights = None
@@ -222,6 +223,10 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             print("Using class weights specified in config", class_weights)
             weights = torch.tensor(class_weights, dtype=torch.float32)
             weights = weights.to(device)
+    else:
+        raise ValueError(
+            f"Invalid task specified: {task}. Choose 'regression' or 'classification'."
+        )
 
     best_metrics = {
         "best_loss": float("inf"),
@@ -943,7 +948,7 @@ def get_predictions(
     model.eval()  # Set the model to evaluation mode
     predictions, filenames = [], []
 
-    with torch.no_grad():  # Disable gradient calculations
+    with torch.inference_mode():  # Disable gradient calculations
         with tqdm.tqdm(total=len(dataloader)) as pbar:
             for i, batch in enumerate(dataloader):
                 data, fname = batch
@@ -1119,11 +1124,16 @@ def train_or_evaluate_epoch(
                         loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
                     elif task == "classification":
                         num_dims = outputs.dim()
-                        # If outputs is 2D and the last dimension is 1 (e.g., [batch_size, 1]), squeeze the last dimension
-                        if num_dims == 2 and outputs.size(1) == 1:
+
+                        if num_dims <= 2:
+                            # For binary classification
                             outputs = outputs.squeeze(-1)
+                            probabilities = F.sigmoid(outputs)
+                        else:
+                            probabilities = F.softmax(outputs, dim=1)
+
                         update_classification_metrics(
-                            metrics[phase], outputs, outcomes, config["num_classes"]
+                            metrics[phase], probabilities, outcomes, config["num_classes"]
                         )
 
                         loss = compute_classification_loss(
