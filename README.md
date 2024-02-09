@@ -19,6 +19,7 @@ Try using pipx by typing `pipx`. If command is not found re-export the PATH `exp
 ` then reload the terminal.
 
 `python3 -m pip install --user pipx`
+
 `python3 -m pipx ensurepath`
 
 
