@@ -10,7 +10,17 @@ Orion is a Python-based application designed for video training and evaluation t
 1. Install Poetry, a Python package manager. You can do this by running the following commands:
 
 `python3 -m pip install --user pipx` <br>
-`python3 -m pipx ensurepath pipx install poetry`
+
+Reload terminal or re-login
+
+`source ~/.zshrc`
+
+Try using pipx by typing `pipx`. If command is not found re-export the PATH `export PATH="$HOME/.local/bin:$PATH"
+` then reload the terminal.
+
+`python3 -m pip install --user pipx`
+`python3 -m pipx ensurepath`
+
 
 Then `poetry install`
 
