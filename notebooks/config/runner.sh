@@ -6,8 +6,8 @@
 source /root/miniforge3/etc/profile.d/mamba.sh
 eval "$(conda shell.bash hook)"  # Ensures Conda commands are available in the script
 
-# Activate the 'torch' environment
-conda activate torch
+# Activate the 'pytorch' environment
+conda activate pytorch
 
 # Execute torchrun with the Python script as an argument and pass the config file to the Python script
 torchrun --standalone --nnodes=1 --nproc-per-node=2 "$1" --config_file="$2" "${@:3}"
