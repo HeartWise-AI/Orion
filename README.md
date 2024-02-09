@@ -18,9 +18,9 @@ Reload terminal or re-login
 Try using pipx by typing `pipx`. If command is not found re-export the PATH `export PATH="$HOME/.local/bin:$PATH"
 ` then reload the terminal.
 
-`python3 -m pip install --user pipx`
-
 `python3 -m pipx ensurepath`
+
+`pipx install poetry`
 
 
 Then `poetry install`
