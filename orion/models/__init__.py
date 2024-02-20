@@ -212,7 +212,7 @@ class X3D(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-        # self.softmax = nn.Softmax(dim=1)
+        self.softmax = nn.Softmax(dim=1)
 
         self.n_classes = n_classes
         if task == "regression":

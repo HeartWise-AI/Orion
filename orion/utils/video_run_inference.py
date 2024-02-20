@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 import torch
 import yaml
@@ -6,6 +7,16 @@ import yaml
 import wandb
 from orion.utils.plot import initialize_classification_metrics, initialize_regression_metrics
 from orion.utils.video_training_and_eval import perform_inference
+
+
+def save_predictions_to_csv(df_predictions, config, split):
+    current_date = datetime.now().strftime("%Y%m%d")
+    model_dir = os.path.dirname(config["model_path"])
+    output_path = os.path.join(
+        config["output_dir"], model_dir, f"{split}_predictions_{current_date}.csv"
+    )
+    print(f"Saving predictions to {output_path}")
+    df_predictions.to_csv(output_path)
 
 
 def run_inference_and_log_to_wandb(
@@ -18,7 +29,7 @@ def run_inference_and_log_to_wandb(
     config["wandb_id"] = wandb_id
     config["resume"] = resume
     config["debug"] = False
-    config["output"] = checkpoints_folder
+    config["output_dir"] = checkpoints_folder
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -69,19 +80,35 @@ def run_inference_and_log_to_wandb(
         best_metrics=best_metrics,
     )
 
+    save_predictions_to_csv(df_predictions_inference, config, split)
+
     return df_predictions_inference
 
 
-def run_inference_and_no_logging(checkpoints_folder, data_path, model_file_name, config_path):
+def run_inference_and_no_logging(config_path, model_path=None, data_path=None, output_dir=None):
     with open(config_path) as file:
         config = yaml.safe_load(file)
-    config["data_filename"] = data_path
-    config["model_path"] = os.path.join(checkpoints_folder, model_file_name)
+
+    required_fields = ["model_path", "data_filename", "output_dir"]
+
+    missing_fields = [
+        field
+        for field in required_fields
+        if config.get(field) is None and locals().get(field) is None
+    ]
+
+    if missing_fields:
+        raise ValueError(f"Missing required config fields: {', '.join(missing_fields)}")
+
+    config["data_filename"] = config.get("data_filename", data_path)
+    config["model_path"] = config.get("model_path", model_path)
+    config["output_dir"] = config.get("output_dir", output_dir)
     config["debug"] = False
-    config["output"] = checkpoints_folder
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     df_predictions_inference = perform_inference(config=config, split="inference")
+
+    save_predictions_to_csv(df_predictions_inference, config, "inference")
 
     return df_predictions_inference

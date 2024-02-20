@@ -107,8 +107,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     print("is main process", is_main_process)
     torch.cuda.set_device(device)
 
-    # Use model_path from config, or default to config["output"] if model_path is None
-    model_path = config.get("model_path") or config["output"]
+    # Use model_path from config, or default to config["output_dir"] if model_path is None
+    model_path = config.get("model_path") or config["output_dir"]
 
     print("Model path:", model_path)
     # Model building and training setup
@@ -357,11 +357,15 @@ def setup_config(config, transforms, is_master, run):
         run_id = wandb.run.id
         print("Run id", run_id)
         config["run_id"] = run_id
-        if ("output" not in config) or (config["output"] is None):
-            config["output"] = generate_output_dir_name(config, run_id=run_id)
-        pathlib.Path(config["output"]).mkdir(parents=True, exist_ok=True)
+        if (
+            ("output" not in config)
+            or ("output_dir" not in config)
+            or (config["output_dir"] is None)
+        ):
+            config["output_dir"] = generate_output_dir_name(config, run_id=run_id)
+        pathlib.Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
         wandb.config.update(config, allow_val_change=True)
-        print("output_folder created", config["output"])
+        print("output_folder created", config["output_dir"])
 
     if config["view_count"] is None:
         print("Loading with 1 view count for mean and std")
@@ -394,7 +398,7 @@ def setup_config(config, transforms, is_master, run):
             config["std"] = std
             if is_master:
                 wandb.config.update(
-                    {"mean": config["mean"], "std": config["std"], "output": config["output"]}
+                    {"mean": config["mean"], "std": config["std"], "output": config["output_dir"]}
                 )
         else:
             print("Using mean and std from config", config["mean"], config["std"])
@@ -557,7 +561,7 @@ def run_training_or_evaluate_orchestrator(
             model,
             optimizer,
             scheduler,
-            config["output"],
+            config["output_dir"],
             wandb,
             best_metrics["best_loss"],
             best_metrics["best_auc"],
@@ -823,7 +827,7 @@ def build_model(config, device, model_path=None, for_inference=False):
             print("Map location set to:", map_location)
         elif not model_path:
             # Handle case where model path is None
-            model_path = os.path.join(config["output"], "best.pt")
+            model_path = os.path.join(config["output_dir"], "best.pt")
 
         # Ensure map_location has a value before loading the checkpoint
         if map_location:
@@ -833,16 +837,25 @@ def build_model(config, device, model_path=None, for_inference=False):
         # Uncomment below to debug checkpoint content
         # print("Model checkpoint content:", checkpoint)
         try:
-            model_state_dict = checkpoint["model_state_dict"]
-            torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
-                model_state_dict, "_orig_mod.module."
-            )
-        except:
-            print("Using legacy state dict")
-            model_state_dict = checkpoint["state_dict"]
-            torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
-                model_state_dict, "module."
-            )
+            model_state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict"))
+
+            # Check and consume "_orig_mod.module." prefix if present
+            if any(k.startswith("_orig_mod.module.") for k in model_state_dict.keys()):
+                torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+                    model_state_dict, "_orig_mod.module."
+                )
+                print("Removed prefix '_orig_mod.module.' from state dict")
+
+            # Check and consume "module." prefix if present
+            elif any(k.startswith("module.") for k in model_state_dict.keys()):
+                torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+                    model_state_dict, "module."
+                )
+                print("Removed prefix 'module.' from state dict")
+
+            model.load_state_dict(model_state_dict)
+        except RuntimeError as e:
+            print(f"Error loading model state dict: {e}")
 
         model.load_state_dict(model_state_dict)
         model.to(device)
@@ -1125,9 +1138,9 @@ def train_or_evaluate_epoch(
                     elif task == "classification":
                         num_dims = outputs.dim()
 
-                        if num_dims <= 2:
+                        if outputs.dim() > 1 and config["num_classes"] <= 2:
                             # For binary classification
-                            outputs = outputs.squeeze(-1)
+                            outputs = outputs.squeeze()
                             probabilities = F.sigmoid(outputs)
                         else:
                             probabilities = F.softmax(outputs, dim=1)
@@ -1244,10 +1257,10 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
         dict: Dictionary of predictions.
     """
     # Build and load the model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.backends.cuda.is_built() else "cpu")
 
-    # Use model_path from config, or default to config["output"] if model_path is None
-    model_path = config.get("model_path", os.path.join(config["output"], "best.pt"))
+    # Use model_path from config, or default to config["output_dir"] if model_path is None
+    model_path = config.get("model_path")
     print("model path", model_path)
 
     task = config.get("task", "regression")
@@ -1385,7 +1398,7 @@ def save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y=
             lambda x: np.argmax(x).astype(int)
         )
 
-    output_path = os.path.join(config["output"], f"{split}_predictions.csv")
+    output_path = os.path.join(config["output_dir"], f"{split}_predictions.csv")
     df_predictions.to_csv(output_path)
 
     return df_predictions

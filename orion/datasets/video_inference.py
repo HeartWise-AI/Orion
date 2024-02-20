@@ -128,9 +128,12 @@ class Video_inference(torch.utils.data.Dataset):
                 print(ve)
 
             fileMode = str(row.iloc[splitIndex]).lower()
-            if split in ["all", fileMode] and os.path.exists(fileName):
-                self.fnames.append(fileName)
-                self.outcome.append(row)
+            if split in ["all", fileMode]:
+                if os.path.exists(fileName):
+                    self.fnames.append(fileName)
+                    self.outcome.append(row)
+                else:
+                    raise FileNotFoundError(f"The file {fileName} does not exist.")
 
         if len(self.fnames) == 0:
             raise ValueError(f"No files found for split {split}")
