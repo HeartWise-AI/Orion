@@ -103,6 +103,7 @@ See `notebooks/config/` for different config.YAML file examples.
 from orion.utils import video_training_and_eval
 import wandb
 import yaml
+import os
 os.environ["WANDB_NOTEBOOK_NAME"] = "test_view_classifier.ipynb"
 os.environ['RANK'] = '0'
 os.environ['WORLD_SIZE'] = '1'
