@@ -108,7 +108,27 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     torch.cuda.set_device(device)
 
     # Use model_path from config, or default to config["output_dir"] if model_path is None
-    model_path = config.get("model_path") or config["output_dir"]
+    model_path = config.get("model_path") or config.get("output_dir")
+    # Extract the last element of the folder path
+    last_folder_name = os.path.basename(model_path)
+
+    if do_log:
+        entity = run.entity
+        project = run.project
+        run_id = run.id
+
+        # Accessing the run using the W&B API
+        api = wandb.Api()
+        run = api.run(f"{entity}/{project}/{run_id}")
+        # Assuming last_folder_name is a string containing the name of the last folder
+        # Concatenate "_" with last_folder_name to form the new tag
+        new_tag = "_" + last_folder_name
+
+        # Ensure run.tags is a tuple before concatenating
+        # Append the new_tag to the existing tags of the run
+        run.tags = run.tags + (new_tag,)
+
+        wandb.run.update()
 
     print("Model path:", model_path)
     # Model building and training setup
