@@ -20,6 +20,9 @@ zarr = "^2.16.1"
 stam-pytorch = "^0.0.4"
 timesformer-pytorch = "^0.4.1"
 opencv-python = "^4.9.0.80"
+torchvision = "^0.17.1"
+scikit-image = "^0.22.0"
+pytorchvideo = "^0.1.5"
 
 
 [build-system]
