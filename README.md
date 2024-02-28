@@ -12,7 +12,7 @@ Orion is a Python-based application designed for video training and evaluation t
 `python3 -m pip install --user pipx` <br>
 
 Reload terminal or re-login
-`export PATH="$PATH:/root/.local/bin`
+`export PATH="$PATH:/root/.local/bin"`
 `source ~/.zshrc` or `source ~/.bashrc`
 
 Try using pipx by typing `pipx`. If command is not found re-export the PATH `export PATH="$HOME/.local/bin:$PATH"
