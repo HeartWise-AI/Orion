@@ -11,10 +11,14 @@ from orion.utils.video_training_and_eval import perform_inference
 
 def save_predictions_to_csv(df_predictions, config, split):
     current_date = datetime.now().strftime("%Y%m%d")
-    model_dir = os.path.dirname(config["model_path"])
-    output_path = os.path.join(
-        config["output_dir"], model_dir, f"{split}_predictions_{current_date}.csv"
-    )
+
+    model_dir = os.path.basename(os.path.dirname(config["model_path"]))
+    filename = f"{model_dir}_{split}_predictions_{current_date}.csv"
+    output_path = os.path.join(config["output_dir"], filename)
+
+    # create the output directory if it doesn't exist
+    os.makedirs(config["output_dir"], exist_ok=True)
+
     print(f"Saving predictions to {output_path}")
     df_predictions.to_csv(output_path)
 
@@ -85,7 +89,9 @@ def run_inference_and_log_to_wandb(
     return df_predictions_inference
 
 
-def run_inference_and_no_logging(config_path, model_path=None, data_path=None, output_dir=None):
+def run_inference_and_no_logging(
+    config_path, split="inference", model_path=None, data_path=None, output_dir=None
+):
     with open(config_path) as file:
         config = yaml.safe_load(file)
 

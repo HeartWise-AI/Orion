@@ -1512,10 +1512,10 @@ def main():
     print("Arguments:", args)
     print("Additional Arguments:", additional_args)
 
-    if not os.path.exists(args.config_file):
-        raise FileNotFoundError(f"Config file '{args.config_file}' not found.")
+    if not os.path.exists(args.config_path):
+        raise FileNotFoundError(f"Config file '{args.config_path}' not found.")
 
-    with open(args.config_file) as file:
+    with open(args.config_path) as file:
         config_defaults = yaml.safe_load(file)
         # print("Initial config", config_defaults)
     # Check if the script is running in sweep mode
