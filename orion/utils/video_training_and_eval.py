@@ -124,11 +124,10 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         # Concatenate "_" with last_folder_name to form the new tag
         new_tag = "_" + last_folder_name
 
-        # Ensure run.tags is a tuple before concatenating
-        # Append the new_tag to the existing tags of the run
-        run.tags = run.tags + (new_tag,)
+        # Ensure new_tag is a list before concatenating
+        run.tags = run.tags + [new_tag]
 
-        wandb.run.update()
+        run.update()
 
     print("Model path:", model_path)
     # Model building and training setup
@@ -149,7 +148,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     # watch gradients only for rank 0
     if is_master:
-        run.watch(model)
+        wandb.watch(model)
+
     ### If PyTorch 2.0 is used, the following line is needed to load the model
 
     # Set up optimizer and scheduler
