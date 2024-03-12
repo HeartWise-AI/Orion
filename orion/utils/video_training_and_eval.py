@@ -109,10 +109,11 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     # Use model_path from config, or default to config["output_dir"] if model_path is None
     model_path = config.get("model_path") or config.get("output_dir")
+    print(model_path)
     # Extract the last element of the folder path
-    last_folder_name = os.path.basename(model_path)
 
     if do_log:
+        last_folder_name = os.path.basename(model_path)
         entity = run.entity
         project = run.project
         run_id = run.id

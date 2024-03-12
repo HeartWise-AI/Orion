@@ -3,8 +3,8 @@ model_name: swin3d_s
 use_amp: true
 model_path: null
 data_filename: /volume/Orion/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_NAS_path_mu.csv
-mean: [115.68102 115.68102 115.68102]
-std: [47.423748 47.423748 47.423748]
+mean: Null
+std: Null
 root: "."
 target_label: Value
 datapoint_loc_label: FileName

@@ -29,10 +29,6 @@ def parse_args():
         action="store_true",
         help="Flag to log in all processes, otherwise only in rank0",
     )
-    parser.add_argument(
-        "--config_file", type=str, default="config.yaml", help="Path to the configuration file"
-    )
-
     # Parse known arguments first
     args, unknown = parser.parse_known_args()
 
@@ -43,4 +39,7 @@ def parse_args():
             key, val = arg.split("=")
             additional_args[key.lstrip("--")] = val
 
+    # If --config_path is not specified in the command line, check additional_args
+    if "config_path" not in args:
+        args.config_path = additional_args.get("config_path", "config.yaml")
     return args, additional_args

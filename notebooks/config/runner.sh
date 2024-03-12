@@ -10,7 +10,7 @@ eval "$(conda shell.bash hook)"  # Ensures Conda commands are available in the s
 conda activate pytorch
 
 # Execute torchrun with the Python script as an argument and pass the config file to the Python script
-torchrun --standalone --nnodes=1 --nproc-per-node=2 "$1" --config_file="$2" "${@:3}"
+torchrun --standalone --nnodes=1 --nproc-per-node=2 "$1" --config_path="$2" "${@:3}"
 #"$1" is the path to your Python script.
-#"$2" is the path to your config file, which is passed along with the --config_file flag.
+#"$2" is the path to your config file, which is passed along with the --config_path flag.
 #"${@:3}" represents all additional arguments starting from the third one, which will be the hyperparameters provided by wandb.
