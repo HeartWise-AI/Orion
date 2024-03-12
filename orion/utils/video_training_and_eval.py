@@ -419,7 +419,8 @@ def setup_config(config, transforms, is_master, run):
                         "mean": config["mean"],
                         "std": config["std"],
                         "output_dir": config["output_dir"],
-                    }
+                    },
+                    allow_val_change=True,
                 )
         else:
             print("Using mean and std from config", config["mean"], config["std"])
@@ -1512,6 +1513,7 @@ def setup_run(args, config_defaults):
             name=config_defaults["project"],  # Assuming 'tag' is an attribute of args
             resume=config_defaults.get("resume", False),
             id=config_defaults.get("wandb_id", None),
+            allow_val_change=True,
         )
     else:
         run = None
