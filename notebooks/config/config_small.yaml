@@ -14,7 +14,6 @@ frames: 32
 device: cuda
 period: 2
 pretrained: false
-output: null
 n_train_patients: null
 seed: 0
 optimizer: RAdam

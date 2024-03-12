@@ -360,7 +360,7 @@ def setup_config(config, transforms, is_master, run):
         config (dict): The updated configuration settings.
 
     Examples:
-        >>> config = {'output': None, 'debug': False, 'test_time_augmentation': False}
+        >>> config = {'output_duir': None, 'debug': False, 'test_time_augmentation': False}
         >>> transforms = [Resize(), Normalize()]
         >>> is_master = True
         >>> updated_config = setup_config(config, transforms, is_master)
@@ -377,11 +377,7 @@ def setup_config(config, transforms, is_master, run):
         run_id = wandb.run.id
         print("Run id", run_id)
         config["run_id"] = run_id
-        if (
-            ("output" not in config)
-            or ("output_dir" not in config)
-            or (config["output_dir"] is None)
-        ):
+        if ("output_dir" not in config) or (config["output_dir"] is None):
             config["output_dir"] = generate_output_dir_name(config, run_id=run_id)
         pathlib.Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
         wandb.config.update(config, allow_val_change=True)
@@ -418,7 +414,11 @@ def setup_config(config, transforms, is_master, run):
             config["std"] = std
             if is_master:
                 wandb.config.update(
-                    {"mean": config["mean"], "std": config["std"], "output": config["output_dir"]}
+                    {
+                        "mean": config["mean"],
+                        "std": config["std"],
+                        "output_dir": config["output_dir"],
+                    }
                 )
         else:
             print("Using mean and std from config", config["mean"], config["std"])
@@ -592,7 +592,7 @@ def run_training_or_evaluate_orchestrator(
         print("best metrics", best_metrics)
         # Generate and save prediction dataframe
         if phase == "val":
-            df_predictions = save_predictions_to_csv(
+            df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
             )
 
@@ -999,17 +999,19 @@ def get_predictions(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
                     outputs = model(data)  # Get model outputs
-
                     # Process outputs for regression or classification tasks
                     if task == "regression":
                         predictions.extend(outputs.detach().view(-1).cpu().numpy())
                     elif task == "classification":
-                        if outputs.dim() == 1:
-                            predictions.extend(torch.sigmoid(outputs).detach().cpu().numpy())
+                        if outputs.dim() <= 2:
+                            # For binary classification, add an extra dimension to make it [batch_size, 1]
+                            predictions.extend(
+                                torch.sigmoid(outputs).detach().cpu().numpy()
+                            )  ## Add sigmoid to get 0 -1 predictions
                         else:
                             predictions.extend(
                                 torch.softmax(outputs, dim=1).detach().cpu().numpy()
-                            )
+                            )  # Softmax for classification
 
                 pbar.update()  # Ensure this is correctly indented
                 pbar.set_description(
@@ -1158,9 +1160,10 @@ def train_or_evaluate_epoch(
                     elif task == "classification":
                         num_dims = outputs.dim()
 
-                        if outputs.dim() > 1 and config["num_classes"] <= 2:
+                        if config["num_classes"] <= 2:
                             # For binary classification
-                            outputs = outputs.squeeze()
+                            if outputs.dim() > 1:
+                                outputs = outputs.squeeze()
                             probabilities = F.sigmoid(outputs)
                         else:
                             probabilities = F.softmax(outputs, dim=1)
@@ -1180,7 +1183,9 @@ def train_or_evaluate_epoch(
                     )  # For regression, keep predictions unprocessed
                 elif task == "classification":
                     # Assuming 'outputs' is your raw model output
-                    if outputs.dim() == 1:
+                    if config["num_classes"] <= 2:
+                        if outputs.dim() > 1:
+                            outputs = outputs.squeeze()
                         # For binary classification, add an extra dimension to make it [batch_size, 1]
                         predictions.extend(
                             F.sigmoid(outputs).detach().cpu().numpy()
@@ -1390,11 +1395,42 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
         )
         split_y = None
 
-    df_predictions = save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y)
+    df_predictions = format_dataframe_predictions(
+        filenames, split_yhat, task, split, config, split_y
+    )
+    save_predictions_to_csv(df_predictions, config, split)
+
     return df_predictions
 
 
-def save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y=None):
+def determine_class(y_hat):
+    import ast
+
+    # Check if y_hat is a string that looks like a list and convert it
+    if isinstance(y_hat, str) and "[" in y_hat and "]" in y_hat:
+        y_hat = ast.literal_eval(y_hat.strip())
+
+    # Check if y_hat is a NumPy array and convert it to a list
+    if isinstance(y_hat, np.ndarray):
+        y_hat = y_hat.tolist()
+
+    # Now y_hat should be a list or a single value
+    if isinstance(y_hat, list):
+        if len(y_hat) == 1:  # Single probability - binary classification
+            y_hat = y_hat[0]  # Extract the single value from the list
+        elif len(y_hat) > 1:  # List of probabilities - multi-class classification
+            return int(np.argmax(y_hat))
+        else:
+            raise ValueError(f"List is empty: {y_hat}")
+
+    # Handle the case where y_hat is a single value
+    if isinstance(y_hat, (int, float)):
+        return int(y_hat > 0.5)
+    else:
+        raise ValueError(f"Unsupported type or content for y_hat: {y_hat}")
+
+
+def format_dataframe_predictions(filenames, split_yhat, task, split, config, split_y=None):
     # The above code is checking if the variable `split_y` is not equal to `None`. If it is not
     # `None`, then the code inside the `if` statement will be executed.
     if split_y is not None:
@@ -1414,14 +1450,27 @@ def save_predictions_to_csv(filenames, split_yhat, task, split, config, split_y=
         except:
             print("Error converting string to array. Check if the y_hat column is a string.")
 
-        df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
-            lambda x: np.argmax(x).astype(int)
-        )
-
-    output_path = os.path.join(config["output_dir"], f"{split}_predictions.csv")
-    df_predictions.to_csv(output_path)
+    df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
 
     return df_predictions
+
+
+def save_predictions_to_csv(df_predictions, config, split):
+    import datetime
+
+    current_date = datetime.datetime.now().strftime("%Y%m%d")
+
+    model_dir = os.path.basename(
+        os.path.dirname(config.get("model_path") or config["output_dir"])
+    )
+    filename = f"{model_dir}_{split}_predictions_{current_date}.csv"
+    output_path = os.path.join(config["output_dir"], filename)
+
+    # create the output directory if it doesn't exist
+    os.makedirs(config["output_dir"], exist_ok=True)
+
+    print(f"Saving predictions to {output_path}")
+    df_predictions.to_csv(output_path)
 
 
 def create_transforms(config):

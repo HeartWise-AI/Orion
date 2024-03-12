@@ -1,5 +1,4 @@
 import os
-from datetime import datetime
 
 import torch
 import yaml
@@ -7,20 +6,6 @@ import yaml
 import wandb
 from orion.utils.plot import initialize_classification_metrics, initialize_regression_metrics
 from orion.utils.video_training_and_eval import perform_inference
-
-
-def save_predictions_to_csv(df_predictions, config, split):
-    current_date = datetime.now().strftime("%Y%m%d")
-
-    model_dir = os.path.basename(os.path.dirname(config["model_path"]))
-    filename = f"{model_dir}_{split}_predictions_{current_date}.csv"
-    output_path = os.path.join(config["output_dir"], filename)
-
-    # create the output directory if it doesn't exist
-    os.makedirs(config["output_dir"], exist_ok=True)
-
-    print(f"Saving predictions to {output_path}")
-    df_predictions.to_csv(output_path)
 
 
 def run_inference_and_log_to_wandb(
@@ -90,7 +75,7 @@ def run_inference_and_log_to_wandb(
 
 
 def run_inference_and_no_logging(
-    config_path, split="inference", model_path=None, data_path=None, output_dir=None
+    config_path, model_path=None, data_path=None, output_dir=None, split="inference"
 ):
     with open(config_path) as file:
         config = yaml.safe_load(file)
@@ -113,8 +98,5 @@ def run_inference_and_no_logging(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    df_predictions_inference = perform_inference(config=config, split="inference")
-
-    save_predictions_to_csv(df_predictions_inference, config, "inference")
-
+    df_predictions_inference = perform_inference(config=config, split=split)
     return df_predictions_inference
