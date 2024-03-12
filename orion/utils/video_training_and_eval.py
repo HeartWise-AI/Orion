@@ -597,6 +597,7 @@ def run_training_or_evaluate_orchestrator(
             df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
             )
+            save_predictions_to_csv(df_predictions, config, phase)
 
     return best_metrics
 
@@ -981,14 +982,26 @@ def get_predictions(
     use_amp=None,
 ):
     model.eval()  # Set the model to evaluation mode
-    predictions, filenames = [], []
+    predictions, targets, filenames = [], [], []
 
     with torch.inference_mode():  # Disable gradient calculations
         with tqdm.tqdm(total=len(dataloader)) as pbar:
             for i, batch in enumerate(dataloader):
-                data, fname = batch
+                if len(batch) == 3:
+                    # If the batch has three elements, it includes the middle tensor
+                    data, outcomes, fname = batch
+                elif len(batch) == 2:
+                    # If the batch has only two elements, it does not include the middle tensor
+                    data, fname = batch
+                    # Optionally, set outcomes to None or a default value if your logic requires it
+                    outcomes = None
+                else:
+                    raise ValueError("Unexpected batch structure.")
+
                 data = data.to(device)
                 filenames.extend(fname)
+                if targets is not None:
+                    targets.extend(outcomes.detach().cpu().numpy())
 
                 # Handle non-4D data if block_size is provided
                 if (
@@ -1020,7 +1033,7 @@ def get_predictions(
                     f"Processing batch {i+1}/{len(dataloader)}"
                 )  # Optional: set a manual description
 
-    return predictions, filenames
+    return predictions, targets, filenames
 
 
 def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
@@ -1120,6 +1133,7 @@ def train_or_evaluate_epoch(
     total_items = 0
     predictions, targets, filenames = [], [], []
     model_loss = config.get("loss")
+    print("is_training", is_training)
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
             for batch in dataloader:
@@ -1127,8 +1141,7 @@ def train_or_evaluate_epoch(
                 data, outcomes, fname = batch
                 data, outcomes = data.to(device), outcomes.to(device)
                 filenames.extend(fname)
-                # print("Data shape:", data.shape)
-                # print("Data type:", data.dtype)
+
                 # print("Data device:", data.device)
                 # print("Is data empty?", data.nelement() == 0)
 
@@ -1270,7 +1283,7 @@ def compute_classification_loss(outputs, targets, model_loss, weights):
     return criterion(outputs, targets)
 
 
-def perform_inference(split, config, metrics=None, best_metrics=None):
+def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None):
     """
     Perform inference using the specified model and data based on the provided configuration.
 
@@ -1305,7 +1318,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
     # Create data loader for inference
     split_dataloader, dataset = load_data(split, config, None, False)
 
-    if split != "inference":
+    if log_wandb:
         (
             split_loss,
             split_yhat,
@@ -1387,7 +1400,7 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
                 )
     else:
         print("Performing inference only on new dataset. No WANDB logging")
-        split_yhat, filenames = get_predictions(
+        split_yhat, split_y, filenames = get_predictions(
             model,
             split_dataloader,
             device,
@@ -1395,7 +1408,6 @@ def perform_inference(split, config, metrics=None, best_metrics=None):
             task,
             use_amp=True,
         )
-        split_y = None
 
     df_predictions = format_dataframe_predictions(
         filenames, split_yhat, task, split, config, split_y
@@ -1451,8 +1463,13 @@ def format_dataframe_predictions(filenames, split_yhat, task, split, config, spl
             )
         except:
             print("Error converting string to array. Check if the y_hat column is a string.")
-
-    df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
+    if config["task"] == "classification":
+        df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
+    else:
+        binary_threshold = config["binary_threshold"]
+        df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
+            lambda x: 1 if x >= binary_threshold else 0
+        )
 
     return df_predictions
 

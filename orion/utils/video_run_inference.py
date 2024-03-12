@@ -1,5 +1,3 @@
-import os
-
 import torch
 import yaml
 
@@ -9,16 +7,21 @@ from orion.utils.video_training_and_eval import perform_inference
 
 
 def run_inference_and_log_to_wandb(
-    checkpoints_folder, model_file_name, wandb_id, resume, config_path, split="test"
+    config_path,
+    wandb_id,
+    model_path,
+    resume,
+    output_dir,
+    split="test",
 ):
     with open(config_path) as file:
         config = yaml.safe_load(file)
 
-    config["model_path"] = os.path.join(checkpoints_folder, model_file_name)
+    config["model_path"] = config.get("model_path", model_path)
     config["wandb_id"] = wandb_id
     config["resume"] = resume
     config["debug"] = False
-    config["output_dir"] = checkpoints_folder
+    config["output_dir"] = config.get("output_dir", output_dir)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -67,9 +70,8 @@ def run_inference_and_log_to_wandb(
         split=split,
         metrics=metrics,
         best_metrics=best_metrics,
+        log_wandb=True,
     )
-
-    save_predictions_to_csv(df_predictions_inference, config, split)
 
     return df_predictions_inference
 
@@ -98,5 +100,23 @@ def run_inference_and_no_logging(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    df_predictions_inference = perform_inference(config=config, split=split)
+    df_predictions_inference = perform_inference(config=config, split=split, log_wandb=False)
     return df_predictions_inference
+
+
+def run_inference(
+    config_path,
+    split="test",
+    log_wandb=False,
+    model_path=None,
+    data_path=None,
+    output_dir=None,
+    wandb_id=None,
+    resume=False,
+):
+    if log_wandb:
+        return run_inference_and_log_to_wandb(
+            config_path, wandb_id, model_path, resume, output_dir, split
+        )
+    else:
+        return run_inference_and_no_logging(config_path, model_path, data_path, output_dir, split)
