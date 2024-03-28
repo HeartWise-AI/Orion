@@ -1000,9 +1000,10 @@ def get_predictions(
 
                 data = data.to(device)
                 filenames.extend(fname)
-                if targets is not None:
-                    targets.extend(outcomes.detach().cpu().numpy())
-
+                if outcomes is not None and hasattr(outcomes, "detach"):
+                    # Check if outcomes is not empty
+                    if outcomes.nelement() > 0:
+                        targets.extend(outcomes.detach().cpu().numpy())
                 # Handle non-4D data if block_size is provided
                 if (
                     config.get("block_size") is not None and len(data.shape) == 5
@@ -1412,6 +1413,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
     df_predictions = format_dataframe_predictions(
         filenames, split_yhat, task, split, config, split_y
     )
+
     save_predictions_to_csv(df_predictions, config, split)
 
     return df_predictions
@@ -1447,7 +1449,8 @@ def determine_class(y_hat):
 def format_dataframe_predictions(filenames, split_yhat, task, split, config, split_y=None):
     # The above code is checking if the variable `split_y` is not equal to `None`. If it is not
     # `None`, then the code inside the `if` statement will be executed.
-    if split_y is not None:
+
+    if split_y is not None and len(split_y) > 0:
         # If split_y is provided, include it in the DataFrame
         data = list(zip(filenames, split_y, split_yhat))
         df_predictions = pd.DataFrame(data, columns=["filename", "y_true", "y_hat"])
@@ -1463,7 +1466,6 @@ def format_dataframe_predictions(filenames, split_yhat, task, split, config, spl
             )
         except:
             print("Error converting string to array. Check if the y_hat column is a string.")
-    if config["task"] == "classification":
         df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
     else:
         binary_threshold = config["binary_threshold"]
