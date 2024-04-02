@@ -515,6 +515,7 @@ def run_training_or_evaluate_orchestrator(
 
     learning_rate = optimizer.param_groups[0]["lr"] if scheduler is not None else config["lr"]
 
+    final_metrics = ''
     if task == "regression":
         print("Epoch logging", epoch)
         # Flatten yhat to 1D if it's 2D
