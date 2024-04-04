@@ -968,7 +968,7 @@ def update_classification_metrics(metrics, preds, target, num_classes):
         >>> target = torch.tensor([1, 0, 1])
         >>> num_classes = 2
         >>> update_classification_metrics(metrics, preds, target, num_classes)"""
-
+    print(list(metrics.keys()))
     if num_classes <= 2:
         # Update for Binary Classification
         metrics["auc"].update(preds, target.int())

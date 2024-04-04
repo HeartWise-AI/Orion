@@ -310,7 +310,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         for split in ["val", "test"]:
             if do_log:
                 # Configure datasets for validation and testing splits
-                perform_inference(split, config, metrics, best_metrics)
+                perform_inference(split, config, False, metrics, best_metrics)
 
         if args.local_rank == 0:
             wandb.finish()
@@ -515,7 +515,7 @@ def run_training_or_evaluate_orchestrator(
 
     learning_rate = optimizer.param_groups[0]["lr"] if scheduler is not None else config["lr"]
 
-    final_metrics = ''
+    final_metrics = ""
     if task == "regression":
         print("Epoch logging", epoch)
         # Flatten yhat to 1D if it's 2D
@@ -573,7 +573,7 @@ def run_training_or_evaluate_orchestrator(
             # Update the best metrics for multi-class classification, handle logic for your use case
             mean_roc_auc_no_nan = metrics_summary["auc_weighted"]
             print(f"Mean ROC AUC score after removing NaNs: {mean_roc_auc_no_nan}")
-    print("final metrics", final_metrics)
+
     # Update and save checkpoints
     if do_log:
         best_loss, best_auc = update_and_save_checkpoints(
@@ -1172,7 +1172,9 @@ def train_or_evaluate_epoch(
                             outputs = outputs.squeeze()
                         else:
                             outputs = outputs.view(-1)
+
                         metrics[phase].update(outputs, outcomes)
+
                         loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
                     elif task == "classification":
                         num_dims = outputs.dim()
