@@ -796,7 +796,11 @@ def log_binary_classification_metrics_to_wandb(
             pred_labels = pred_labels.flatten()
 
         # Define your class names (replace with actual class names)
-        class_names = [str(label) for label in label_map]
+        # Check if label_map is defined, if not, generate class names based on unique classes in y_true
+        if label_map is None:
+            class_names = ["0", "1"]
+        else:
+            class_names = [str(label) for label in label_map]
 
         # Log the confusion matrix in wandb
         wandb.log(
@@ -968,7 +972,7 @@ def update_classification_metrics(metrics, preds, target, num_classes):
         >>> target = torch.tensor([1, 0, 1])
         >>> num_classes = 2
         >>> update_classification_metrics(metrics, preds, target, num_classes)"""
-    print(list(metrics.keys()))
+    # print(list(metrics.keys()))
     if num_classes <= 2:
         # Update for Binary Classification
         metrics["auc"].update(preds, target.int())

@@ -807,30 +807,33 @@ def build_model(config, device, model_path=None, for_inference=False):
 
     # Add the new classification feature
     if config["task"] == "classification":
-        try:
-            dataset = pd.read_csv(
-                os.path.join("../../data/", config["data_filename"]),
-                sep="µ",
-                engine="python",
-            )
-            # Initialize labels_map with None for each class index
+        dataset = pd.read_csv(
+            os.path.join(config["data_filename"]),
+            sep="µ",
+            engine="python",
+        )
+        # Adjust labels_map initialization based on num_classes
+        if config["num_classes"] == 1:
+            labels_map = {0: 0, 1: 1}
+        else:
             labels_map = {i: None for i in range(config["num_classes"])}
 
-            # Update labels_map with actual labels from dataset
-            for int_label, label in zip(
-                dataset[config["target_label"]], dataset[config["label_loc_label"]]
-            ):
-                labels_map[int(int_label)] = label
+        # Update labels_map with actual labels from dataset
+        for int_label, label in zip(
+            dataset[config["target_label"]], dataset[config["label_loc_label"]]
+        ):
+            # Ensure binary classification for single class scenario
+            if config["num_classes"] == 1 and int(int_label) not in labels_map:
+                raise ValueError(f"Unexpected label {int_label} for binary classification.")
+            labels_map[int(int_label)] = label
 
-            print("Labels map before sorting:", labels_map)
+        print("Labels map before sorting:", labels_map)
 
-            # Optionally, sort the labels_map if needed
-            labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
+        # Optionally, sort the labels_map if needed
+        labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
 
-            print("Labels map after sorting:", labels_map)
-        except:
-            print("No label map")
-            labels_map = None
+        print("Labels map after sorting:", labels_map)
+
     else:
         labels_map = None
 
