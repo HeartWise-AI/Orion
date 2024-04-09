@@ -1186,7 +1186,8 @@ def train_or_evaluate_epoch(
                             probabilities = F.sigmoid(outputs)
                         else:
                             probabilities = F.softmax(outputs, dim=1)
-
+                            if probabilities.dim() > 1:
+                                probabilities = probabilities.squeeze()
                         update_classification_metrics(
                             metrics[phase], probabilities, outcomes, config["num_classes"]
                         )
