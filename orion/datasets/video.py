@@ -207,7 +207,11 @@ class Video(torch.utils.data.Dataset):
         if self.video_transforms is not None:
             transforms = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
             scripted_transforms = torch.jit.script(transforms)
-            video = scripted_transforms(video)
+            try:
+                video = scripted_transforms(video)
+            except RuntimeError as e:
+                print(f"Skipping video {self.fnames[index]} due to error: {str(e)}")
+                return self.__getitem__(index + 1)  # retry with next sample
 
         if self.rand_augment:
             raug = [

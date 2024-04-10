@@ -211,14 +211,13 @@ class X3D(nn.Module):
         #     self.fc2 = nn.Linear(2048, 1)
 
         self.dropout = nn.Dropout(dropout)
-
-        self.softmax = nn.Softmax(dim=1)
-
-        self.n_classes = n_classes
         if task == "regression":
             self.regress = nn.Linear(2048, 1)
-        # else:
-        #    self.sigmoid = nn.Sigmoid()
+        elif task == "classification":
+            self.softmax = nn.Softmax(dim=1)
+            self.sigmoid = nn.Sigmoid()
+
+        self.n_classes = n_classes
 
         # This loop iterates through all modules in the current model.
         # Each module could be a layer or a sub-model.
@@ -336,6 +335,10 @@ class X3D(nn.Module):
             x = x.squeeze(4).squeeze(3).squeeze(2)  # B C
             x = self.dropout(x)
             x = self.fc2(x).unsqueeze(2)  # B C 1
+            if self.n_classes <= 2:
+                x = self.sigmoid(x)
+            else:
+                x = self.softmax(x)
         if self.task == "loc":
             x = self.relu(x)
             x = x.squeeze(4).squeeze(3).permute(0, 2, 1)  # B T C
@@ -350,14 +353,6 @@ class X3D(nn.Module):
             # print("DROPOUT", x.shape)
             x = self.regress(x)
             # print("REGRESS", x.shape)
-
-        # switch for final layer type. Sigmoid for binary classification, softmax for multiclass.
-        if self.task == "classification":
-            if self.n_classes == 2:
-                x = self.sigmoid(x)
-            else:
-                x = self.softmax(x)
-        return x
 
 
 def replace_logits(self, n_classes):

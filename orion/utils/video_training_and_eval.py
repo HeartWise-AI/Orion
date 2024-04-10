@@ -1503,20 +1503,23 @@ def save_predictions_to_csv(df_predictions, config, split):
 
 def create_transforms(config):
     transform_list = []
-    for item in config["transforms"]:
-        transform_name = item["transform"]
-        params = item.get("params", {})
+    if config.get("transforms") is not None:
+        for item in config["transforms"]:
+            transform_name = item["transform"]
+            params = item.get("params", {})
 
-        # Handle null values correctly
-        params = {k: (None if v == "null" else v) for k, v in params.items()}
+            # Handle null values correctly
+            params = {
+                k: (None if isinstance(v, np.ndarray) and pd.isnull(v).all() else v)
+                for k, v in params.items()
+            }
 
-        # Dynamically get the transform class from torchvision.transforms
-        transform_class = getattr(transforms, transform_name)
+            # Dynamically get the transform class from torchvision.transforms
+            transform_class = getattr(transforms, transform_name)
 
-        # Create an instance of the transform class with the provided parameters
-        transform_instance = transform_class(**params)
-        transform_list.append(transform_instance)
-
+            # Create an instance of the transform class with the provided parameters
+            transform_instance = transform_class(**params)
+            transform_list.append(transform_instance)
     return transform_list
 
 
