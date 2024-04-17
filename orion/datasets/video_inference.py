@@ -30,7 +30,7 @@ class Video_inference(torch.utils.data.Dataset):
             or ``SmallTrace''
             Can also be a list to output a tuple with all specified target types.
             The targets represent:
-                ``Filename'' (string): filename of video
+                ``Filename'' (string): filenam e of video
                 ``EF'' (float): ejection fraction
                 ``EDV'' (float): end-diastolic volume
                 ``ESV'' (float): end-systolic volume
@@ -113,10 +113,16 @@ class Video_inference(torch.utils.data.Dataset):
         self.fnames, self.outcome = [], []
 
         df_dataset = pd.read_csv(
-            os.path.join(self.folder, self.filename), sep="µ", engine="python"
+            os.path.join(self.folder, self.filename), sep="α", engine="python"
         )
-        self.header = list(df_dataset.columns)  # Add this line to store the DataFrame's header
+        self.header = list(df_dataset.columns)
+        if len(self.header) == 1:
+            raise ValueError(
+                "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
+            )
+        # Add this line to store the DataFrame's header
         filenameIndex = list(df_dataset.columns).index(self.datapoint_loc_label)
+
         splitIndex = list(df_dataset.columns).index("Split")
 
         for i, row in df_dataset.iterrows():
@@ -433,7 +439,7 @@ class Echo_Multi(torch.utils.data.Dataset):
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
             with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("µ")
+                self.header = f.readline().strip().split("α")
                 view_countIndex = self.header.index(self.view_count)
                 # target_index = self.header.index(self.target_label)
                 # filenameIndex = self.header.index(self.datapoint_loc_label + str(0))
@@ -442,7 +448,7 @@ class Echo_Multi(torch.utils.data.Dataset):
                 filenameIndex = []
                 outcomeIndex = []
                 for line in f:
-                    lineSplit = line.strip().split("µ")
+                    lineSplit = line.strip().split("α")
                     view_count = int(lineSplit[view_countIndex])
                     for i in range(view_count):
                         filenameIndex.append(self.header.index(self.datapoint_loc_label + str(i)))

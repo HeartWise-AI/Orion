@@ -809,7 +809,7 @@ def build_model(config, device, model_path=None, for_inference=False):
     if config["task"] == "classification":
         dataset = pd.read_csv(
             os.path.join(config["data_filename"]),
-            sep="µ",
+            sep="α",
             engine="python",
         )
         # Adjust labels_map initialization based on num_classes

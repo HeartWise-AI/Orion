@@ -107,7 +107,12 @@ class Video(torch.utils.data.Dataset):
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
             with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("µ")
+                self.header = f.readline().strip().split("α")
+                if len(self.header) == 1:
+                    raise ValueError(
+                        "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
+                    )
+
             self.fnames, self.outcomes, target_index = self.load_data(split, target_label)
             self.frames = collections.defaultdict(list)
             # pdb.set_trace()
@@ -128,9 +133,10 @@ class Video(torch.utils.data.Dataset):
                 self.weight_list[np.where(labels == label)] = weight
 
     def load_data(self, split, target_label):
-        # Read the "µ" separated file using pandas
+        # Read the "α" separated file using pandas
         file_path = os.path.join(self.folder, self.filename)
-        data = pd.read_csv(file_path, sep="µ", engine="python")
+        data = pd.read_csv(file_path, sep="α", engine="python")
+        print(data)
 
         filename_index = data.columns.get_loc(self.datapoint_loc_label)
         split_index = data.columns.get_loc("Split")
@@ -441,7 +447,7 @@ class Video_Multi(torch.utils.data.Dataset):
 
         self.fnames, self.outcome, self.artery_label = [], [], []
 
-        df_dataset = pd.read_csv(os.path.join(self.folder, self.filename), sep="µ")
+        df_dataset = pd.read_csv(os.path.join(self.folder, self.filename), sep="α")
         view_countIndex = df_dataset.columns.get_loc(self.view_count)
         filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
         splitIndex = df_dataset.columns.get_loc("Split")

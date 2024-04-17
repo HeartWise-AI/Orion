@@ -136,7 +136,12 @@ class Video_feature(torch.utils.data.Dataset):
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
             with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("µ")
+                self.header = f.readline().strip().split("α")
+                if len(self.header) == 1:
+                    raise ValueError(
+                        "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
+                    )
+
                 filenameIndex = self.header.index(self.datapoint_loc_label)
                 splitIndex = self.header.index("Split")
                 target_index = self.header.index(target_label[0])
@@ -144,7 +149,7 @@ class Video_feature(torch.utils.data.Dataset):
                 segmentIndex = self.header.index("segment")
 
                 for line in f:
-                    lineSplit = line.strip().split("µ")
+                    lineSplit = line.strip().split("α")
                     # pdb.set_trace()
                     fileName = lineSplit[filenameIndex]
 
@@ -177,7 +182,7 @@ class Video_feature(torch.utils.data.Dataset):
             """
             ### CHANGE
             import pandas as pd
-            df_w = pd.read_csv(data_filename, sep = 'µ', engine='python')
+            df_w = pd.read_csv(data_filename, sep = 'α', engine='python')
             w_list = df_w[target_label].loc[df_w['Split'] == 'TRAIN'].value_counts().tolist()
             w_max = max(w_list)
             for i in range(len(w_list)):
@@ -482,7 +487,7 @@ class Video_Multi(torch.utils.data.Dataset):
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
             with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("µ")
+                self.header = f.readline().strip().split("α")
                 view_countIndex = self.header.index(self.view_count)
                 # target_index = self.header.index(self.target_label)
                 filenameIndex = self.header.index(self.datapoint_loc_label + str(0))
@@ -491,7 +496,7 @@ class Video_Multi(torch.utils.data.Dataset):
                 filenameIndex = []
                 outcomeIndex = []
                 for line in f:
-                    lineSplit = line.strip().split("µ")
+                    lineSplit = line.strip().split("α")
                     view_count = int(lineSplit[view_countIndex])
                     for i in range(view_count):
                         filenameIndex.append(self.header.index(self.datapoint_loc_label + str(i)))

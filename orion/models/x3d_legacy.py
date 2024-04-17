@@ -215,8 +215,8 @@ class X3D_legacy(nn.Module):
         self.n_classes = n_classes
         if task == "regression":
             self.regress = nn.Linear(2048, 1)
-        # else:
-        #    self.sigmoid = nn.Sigmoid()
+        elif task == "classification":
+            self.sigmoid = nn.Sigmoid()
 
         # This loop iterates through all modules in the current model.
         # Each module could be a layer or a sub-model.
@@ -351,7 +351,7 @@ class X3D_legacy(nn.Module):
 
         # switch for final layer type. Sigmoid for binary classification, softmax for multiclass.
         if self.task == "classification":
-            if self.n_classes == 2:
+            if self.n_classes <= 2:
                 x = self.sigmoid(x)
             else:
                 x = self.softmax(x)

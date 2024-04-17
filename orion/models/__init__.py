@@ -353,6 +353,7 @@ class X3D(nn.Module):
             # print("DROPOUT", x.shape)
             x = self.regress(x)
             # print("REGRESS", x.shape)
+        return x
 
 
 def replace_logits(self, n_classes):

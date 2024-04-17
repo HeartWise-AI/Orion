@@ -134,7 +134,7 @@ class Video_dist(torch.utils.data.Dataset):
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
             with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("µ")
+                self.header = f.readline().strip().split("α")
                 filenameIndex = self.header.index(self.datapoint_loc_label)
                 splitIndex = self.header.index("Split")
                 ### CHANGE
@@ -144,7 +144,7 @@ class Video_dist(torch.utils.data.Dataset):
                 ###
 
                 for line in f:
-                    lineSplit = line.strip().split("µ")
+                    lineSplit = line.strip().split("α")
                     # pdb.set_trace()
                     fileName = lineSplit[filenameIndex]
 
@@ -475,7 +475,7 @@ class Video_Multi(torch.utils.data.Dataset):
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
             with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("µ")
+                self.header = f.readline().strip().split("α")
                 view_countIndex = self.header.index(self.view_count)
                 # target_index = self.header.index(self.target_label)
                 filenameIndex = self.header.index(self.datapoint_loc_label + str(0))
@@ -484,7 +484,7 @@ class Video_Multi(torch.utils.data.Dataset):
                 filenameIndex = []
                 outcomeIndex = []
                 for line in f:
-                    lineSplit = line.strip().split("µ")
+                    lineSplit = line.strip().split("α")
                     view_count = int(lineSplit[view_countIndex])
                     for i in range(view_count):
                         filenameIndex.append(self.header.index(self.datapoint_loc_label + str(i)))
