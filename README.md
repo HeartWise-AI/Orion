@@ -15,13 +15,11 @@ Reload terminal or re-login
 `export PATH="$PATH:/root/.local/bin"`
 `source ~/.zshrc` or `source ~/.bashrc`
 
-Try using pipx by typing `pipx`. If command is not found re-export the PATH `export PATH="$HOME/.local/bin:$PATH"
-` then reload the terminal.
+Try using pipx by typing `pipx`. If command is not found re-export the PATH `export PATH="$HOME/.local/bin:$PATH" ` then reload the terminal.
 
 `python3 -m pipx ensurepath`
 
 `pipx install poetry`
-
 
 Then `poetry install`
 
@@ -42,7 +40,7 @@ See `notebooks/config/` for different config.YAML file examples.
 - model_name: The name of the model to use.
 - model_path: The path to the model file. If this is set to null, a new model will be created.
 - use_amp: Whether to use automatic mixed precision for training. This can speed up training on GPUs.
-- data_filename: The path to the data file.
+- data_filename: The path to the data file. The data needs to be split using the alpha character : α - this is to prevent commas present in text reports for wrongly splitting the row.
 - root: The root directory for the data.
 - target_label: The label to predict.
 - datapoint_loc_label: The label for the data point location.

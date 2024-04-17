@@ -1491,7 +1491,7 @@ def save_predictions_to_csv(df_predictions, config, split):
     model_dir = os.path.basename(
         os.path.dirname(config.get("model_path") or config["output_dir"])
     )
-    filename = f"{model_dir}_{split}_predictions_{current_date}.csv"
+    filename = f"{model_dir}{split}_predictions_{current_date}.csv"
     output_path = os.path.join(config["output_dir"], filename)
 
     # create the output directory if it doesn't exist
