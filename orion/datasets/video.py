@@ -136,7 +136,6 @@ class Video(torch.utils.data.Dataset):
         # Read the "α" separated file using pandas
         file_path = os.path.join(self.folder, self.filename)
         data = pd.read_csv(file_path, sep="α", engine="python")
-        print(data)
 
         filename_index = data.columns.get_loc(self.datapoint_loc_label)
         split_index = data.columns.get_loc("Split")

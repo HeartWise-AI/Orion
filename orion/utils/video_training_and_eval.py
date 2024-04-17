@@ -166,10 +166,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         scheduler.load_state_dict(sched_state)
 
     ## Data loader
-    train_loader, train_dataset = load_data(
-        "train", config, transforms, config["weighted_sampling"]
-    )
-    val_loader, val_dataset = load_data("val", config, transforms, config["weighted_sampling"])
+    train_dataset = load_dataset("train", config, transforms, config["weighted_sampling"])
+    val_dataset = load_dataset("val", config, transforms, config["weighted_sampling"])
 
     # Simplified DataLoader setup
     def create_dataloader(dataset, sampler_type, batch_size, num_workers, pin_memory, drop_last):
@@ -916,7 +914,7 @@ def build_model(config, device, model_path=None, for_inference=False):
     return model, None, None, 0, float("inf"), {}, labels_map
 
 
-def load_data(split, config, transforms, weighted_sampling):
+def load_dataset(split, config, transforms, weighted_sampling):
     """
     Load Video dataset for a given split (train, val, test).
 
@@ -966,15 +964,7 @@ def load_data(split, config, transforms, weighted_sampling):
     else:
         dataset = orion.datasets.Video_inference(split=split, **kwargs)
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=config["batch_size"],
-        num_workers=config["num_workers"],
-        shuffle=(split == "train"),
-        pin_memory=(config["device"] == "cuda"),
-        drop_last=(split != "test" and split != "inference"),
-    )
-    return dataloader, dataset
+    return dataset
 
 
 def get_predictions(
@@ -1324,7 +1314,16 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
     model.eval()
 
     # Create data loader for inference
-    split_dataloader, dataset = load_data(split, config, None, False)
+    dataset = load_dataset(split, config, None, False)
+
+    split_dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=config["batch_size"],
+        num_workers=config["num_workers"],
+        shuffle=False,
+        pin_memory=(config["device"] == "cuda"),
+        drop_last=(split != "test" and split != "inference"),
+    )
 
     if log_wandb:
         (
