@@ -816,14 +816,15 @@ def build_model(config, device, model_path=None, for_inference=False):
         else:
             labels_map = {i: None for i in range(config["num_classes"])}
 
-        # Update labels_map with actual labels from dataset
-        for int_label, label in zip(
-            dataset[config["target_label"]], dataset[config["label_loc_label"]]
-        ):
-            # Ensure binary classification for single class scenario
-            if config["num_classes"] == 1 and int(int_label) not in labels_map:
-                raise ValueError(f"Unexpected label {int_label} for binary classification.")
-            labels_map[int(int_label)] = label
+        if (for_inference == False) and (config["label_loc_label"] is not None):
+            # Update labels_map with actual labels from dataset
+            for int_label, label in zip(
+                dataset[config["target_label"]], dataset[config["label_loc_label"]]
+            ):
+                # Ensure binary classification for single class scenario
+                if config["num_classes"] == 1 and int(int_label) not in labels_map:
+                    raise ValueError(f"Unexpected label {int_label} for binary classification.")
+                labels_map[int(int_label)] = label
 
         print("Labels map before sorting:", labels_map)
 
@@ -1490,7 +1491,7 @@ def save_predictions_to_csv(df_predictions, config, split):
     model_dir = os.path.basename(
         os.path.dirname(config.get("model_path") or config["output_dir"])
     )
-    filename = f"{model_dir}{split}_predictions_{current_date}.csv"
+    filename = f"{model_dir}{'/' if not model_dir.endswith('/') else ''}{split}_predictions_{current_date}.csv"
     output_path = os.path.join(config["output_dir"], filename)
 
     # create the output directory if it doesn't exist
