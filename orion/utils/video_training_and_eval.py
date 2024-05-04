@@ -1437,11 +1437,13 @@ def determine_class(y_hat):
     if isinstance(y_hat, np.ndarray):
         y_hat = y_hat.tolist()
 
+    # Handle nested lists
+    while isinstance(y_hat, list) and len(y_hat) == 1:
+        y_hat = y_hat[0]
+
     # Now y_hat should be a list or a single value
     if isinstance(y_hat, list):
-        if len(y_hat) == 1:  # Single probability - binary classification
-            y_hat = y_hat[0]  # Extract the single value from the list
-        elif len(y_hat) > 1:  # List of probabilities - multi-class classification
+        if len(y_hat) > 1:  # List of probabilities - multi-class classification
             return int(np.argmax(y_hat))
         else:
             raise ValueError(f"List is empty: {y_hat}")
@@ -1454,25 +1456,21 @@ def determine_class(y_hat):
 
 
 def format_dataframe_predictions(filenames, split_yhat, task, split, config, split_y=None):
-    # The above code is checking if the variable `split_y` is not equal to `None`. If it is not
-    # `None`, then the code inside the `if` statement will be executed.
-
     if split_y is not None and len(split_y) > 0:
-        # If split_y is provided, include it in the DataFrame
         data = list(zip(filenames, split_y, split_yhat))
         df_predictions = pd.DataFrame(data, columns=["filename", "y_true", "y_hat"])
     else:
-        # If split_y is None, create DataFrame without the y_true column
         data = list(zip(filenames, split_yhat))
         df_predictions = pd.DataFrame(data, columns=["filename", "y_hat"])
 
     if task == "classification":
-        try:
-            df_predictions["y_hat"] = df_predictions["y_hat"].apply(
-                lambda x: np.fromstring(x.strip("[]"), sep=" ")
-            )
-        except:
-            print("Error converting string to array. Check if the y_hat column is a string.")
+        if isinstance(df_predictions["y_hat"].iloc[0], str):
+            try:
+                df_predictions["y_hat"] = df_predictions["y_hat"].apply(
+                    lambda x: np.fromstring(x.strip("[]"), sep=" ")
+                )
+            except:
+                print("Error converting string to array. Check if the y_hat column is a string.")
         df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
     else:
         binary_threshold = config["binary_threshold"]
