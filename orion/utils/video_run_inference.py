@@ -99,6 +99,7 @@ def run_inference_and_no_logging(
     config["debug"] = False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Split: ", split)
 
     df_predictions_inference = perform_inference(config=config, split=split, log_wandb=False)
     return df_predictions_inference

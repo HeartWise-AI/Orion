@@ -93,8 +93,6 @@ class Video_inference(torch.utils.data.Dataset):
         self.filename = data_filename
         self.datapoint_loc_label = datapoint_loc_label
         self.split = split
-        if not isinstance(target_label, list):
-            target_label = [target_label]
         self.target_label = target_label
         self.mean = format_mean_std(mean)
         self.std = format_mean_std(std)
@@ -116,6 +114,7 @@ class Video_inference(torch.utils.data.Dataset):
             os.path.join(self.folder, self.filename), sep="α", engine="python"
         )
         self.header = list(df_dataset.columns)
+
         if len(self.header) == 1:
             raise ValueError(
                 "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
@@ -124,6 +123,11 @@ class Video_inference(torch.utils.data.Dataset):
         filenameIndex = list(df_dataset.columns).index(self.datapoint_loc_label)
 
         splitIndex = list(df_dataset.columns).index("Split")
+
+        if target_label is None:
+            target_index = None
+        else:
+            target_index = df_dataset.columns.get_loc(target_label)
 
         for i, row in df_dataset.iterrows():
             try:
@@ -137,7 +141,8 @@ class Video_inference(torch.utils.data.Dataset):
             if split in ["all", fileMode]:
                 if os.path.exists(fileName):
                     self.fnames.append(fileName)
-                    self.outcome.append(row)
+                    if (target_index is not None) and (not pd.isna(row.iloc[target_index])):
+                        self.outcome.append(row.iloc[target_index])
                 else:
                     raise FileNotFoundError(f"The file {fileName} does not exist.")
 
@@ -254,60 +259,10 @@ class Video_inference(torch.utils.data.Dataset):
             else:
                 start = np.array([0])
 
-        if self.split == "inference":
+        if self.split == "inference" or self.target_label is None:
             target = None
         else:
-            # Gather targets
-            target = []
-            for t in self.target_label:
-                key = os.path.splitext(self.fnames[index])[0]
-                if t == "Filename":
-                    target.append(self.fnames[index])
-                elif t == "LargeIndex":
-                    # Traces are sorted by cross-sectional area
-                    # Largest (diastolic) frame is last
-                    target.append(np.int(self.frames[key][-1]))
-                elif t == "SmallIndex":
-                    # Largest (diastolic) frame is first
-                    target.append(np.int(self.frames[key][0]))
-                elif t == "LargeFrame":
-                    target.append(video[:, self.frames[key][-1], :, :])
-                elif t == "SmallFrame":
-                    target.append(video[:, self.frames[key][0], :, :])
-                elif t in ["LargeTrace", "SmallTrace"]:
-                    if t == "LargeTrace":
-                        t = self.trace[key][self.frames[key][-1]]
-                    else:
-                        t = self.trace[key][self.frames[key][0]]
-                    x1, y1, x2, y2 = t[:, 0], t[:, 1], t[:, 2], t[:, 3]
-                    x = np.concatenate((x1[1:], np.flip(x2[1:])))
-                    y = np.concatenate((y1[1:], np.flip(y2[1:])))
-
-                    r, c = skimage.draw.polygon(
-                        np.rint(y).astype(np.int),
-                        np.rint(x).astype(np.int),
-                        (video.shape[2], video.shape[3]),
-                    )
-                    mask = np.zeros((video.shape[2], video.shape[3]), np.float32)
-                    mask[r, c] = 1
-                    target.append(mask)
-                else:
-                    if self.split == "clinical_test" or self.split == "external_test":
-                        # change this
-                        #     target.append(np.float32(0))
-                        # else:
-                        #     target.append(np.float32(self.outcome[index][self.header.index(t)]))
-                        # change this
-                        target.append(self.outcome[index].iloc[self.header.index(t)])
-                    else:
-                        target.append(self.outcome[index].iloc[self.header.index(t)])
-
-                target = [np.float32(i) for i in target]
-        if target is not None:
-            if target != []:
-                target = tuple(target) if len(target) > 1 else target[0]
-                if self.target_transform is not None:
-                    target = self.target_transform(target)
+            target = self.outcome[index]
 
         # Select random clips
         video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in start)
@@ -327,8 +282,10 @@ class Video_inference(torch.utils.data.Dataset):
             ] = video  # pylint: disable=E1130
             i, j = np.random.randint(0, 2 * self.pad, 2)
             video = temp[:, :, i : (i + h), j : (j + w)]
-
-        return video, self.fnames[index]
+        if target is not None:
+            return video, target, self.fnames[index]
+        else:
+            return video, self.fnames[index]
 
     def __len__(self):
         return len(self.fnames)

@@ -592,6 +592,8 @@ def run_training_or_evaluate_orchestrator(
         best_metrics["best_auc"] = best_auc
         print("best metrics", best_metrics)
         # Generate and save prediction dataframe
+        print("Generating predictions dataframe")
+        print(phase)
         if phase == "val":
             df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
@@ -1130,107 +1132,118 @@ def train_or_evaluate_epoch(
     predictions, targets, filenames = [], [], []
     model_loss = config.get("loss")
     print("is_training", is_training)
+
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
-            for batch in dataloader:
-                # print(device)
-                data, outcomes, fname = batch
+            for data, outcomes, fname in dataloader:
                 data, outcomes = data.to(device), outcomes.to(device)
                 filenames.extend(fname)
 
-                # print("Data device:", data.device)
-                # print("Is data empty?", data.nelement() == 0)
-
-                # Handle non-4D data if block_size is provided
-                if (
-                    config.get("block_size") is not None and len(data.shape) == 5
-                ):  # assuming shape is (B, T, C, H, W)
-                    # Flatten the temporal and batch dimension to make data 4D
-                    batch_size, frames, channels, height, width = data.shape
-                    data = data.view(batch_size * frames, channels, height, width)
+                if config.get("block_size") is not None and len(data.shape) == 5:
+                    data = handle_block_size(data)
 
                 with torch.autocast(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
-                    # Get model outputs, handle block_size within output generation
-
                     outputs = model(data)
+                    loss = compute_loss_and_update_metrics(
+                        outputs,
+                        outcomes,
+                        task,
+                        model_loss,
+                        weights,
+                        device,
+                        metrics,
+                        phase,
+                        config,
+                    )
 
-                    # Loss computation
-                    if task == "regression":
-                        # print("Outputs first", outputs)
-                        # print("Outcomes", outcomes)
-                        # print("fname", fname)
-                        # Conditional squeeze: only apply if there are more than 1 dimension
-                        if outputs.dim() > 1 and any(size > 1 for size in outputs.shape):
-                            outputs = outputs.squeeze()
-                        else:
-                            outputs = outputs.view(-1)
-
-                        metrics[phase].update(outputs, outcomes)
-
-                        loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
-                    elif task == "classification":
-                        num_dims = outputs.dim()
-
-                        if config["num_classes"] <= 2:
-                            # For binary classification
-                            if outputs.dim() > 1:
-                                outputs = outputs.squeeze()
-                            probabilities = F.sigmoid(outputs)
-                        else:
-                            probabilities = F.softmax(outputs, dim=1)
-                            if probabilities.dim() > 1:
-                                probabilities = probabilities.squeeze()
-                        update_classification_metrics(
-                            metrics[phase], probabilities, outcomes, config["num_classes"]
-                        )
-
-                        loss = compute_classification_loss(
-                            outputs, outcomes, model_loss, weights
-                        ).cuda(device)
-
-                # Record metrics for each output, handle regression and classification separately
-                if task == "regression":
-                    predictions.extend(
-                        outputs.detach().view(-1).cpu().numpy()
-                    )  # For regression, keep predictions unprocessed
-                elif task == "classification":
-                    # Assuming 'outputs' is your raw model output
-                    if config["num_classes"] <= 2:
-                        if outputs.dim() > 1:
-                            outputs = outputs.squeeze()
-                        # For binary classification, add an extra dimension to make it [batch_size, 1]
-                        predictions.extend(
-                            F.sigmoid(outputs).detach().cpu().numpy()
-                        )  ## Add sigmoid to get 0 -1 predictions
-                    else:
-                        predictions.extend(
-                            F.softmax(outputs, dim=1).detach().cpu().numpy()
-                        )  # Softmax for classification
-
-                # Training logic
+                predictions.extend(get_predictions(outputs, task, config))
+                targets.extend(outcomes.detach().cpu().numpy())
 
                 if is_training:
-                    optimizer.zero_grad()
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
+                    backpropagate(optimizer, scaler, loss)
 
                 total_loss += loss.item() * data.size(0)
                 total_items += data.size(0)
-                targets.extend(outcomes.detach().cpu().numpy())
 
                 pbar.set_postfix(loss=(total_loss / total_items))
                 pbar.update()
 
-            if (is_training == False) & (phase == "val") & (scheduler is not None):
-                # Assuming scheduler is ReduceLROnPlateau, which requires validation loss
+            if not is_training and phase == "val" and scheduler is not None:
                 scheduler.step(loss)
 
         average_loss = total_loss / total_items
 
     return average_loss, predictions, targets, filenames
+
+
+def handle_block_size(data):
+    batch_size, frames, channels, height, width = data.shape
+    data = data.view(batch_size * frames, channels, height, width)
+    return data
+
+
+def compute_loss_and_update_metrics(
+    outputs, outcomes, task, model_loss, weights, device, metrics, phase, config
+):
+    if task == "regression":
+        outputs = adjust_output_dimensions(outputs)
+        loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
+        metrics[phase].update(outputs, outcomes)
+    elif task == "classification":
+        loss = compute_classification_loss(outputs, outcomes, model_loss, weights).cuda(device)
+        probabilities = get_probabilities(outputs, config)
+        update_classification_metrics(
+            metrics[phase], probabilities, outcomes, config["num_classes"]
+        )
+    return loss
+
+
+def adjust_output_dimensions(outputs):
+    if outputs.dim() > 1 and any(size > 1 for size in outputs.shape):
+        outputs = outputs.squeeze()
+    else:
+        outputs = outputs.view(-1)
+    return outputs
+
+
+def get_probabilities(outputs, config):
+    if config["num_classes"] <= 2:
+        if outputs.ndim > 1 and outputs.shape[1] == 2:
+            probabilities = torch.sigmoid(outputs)[
+                :, 1
+            ]  # Use the second column for binary classification
+        elif outputs.ndim > 1 and outputs.shape[1] == 1:
+            probabilities = torch.sigmoid(outputs).squeeze()  # Squeeze the dimension
+        else:
+            probabilities = torch.sigmoid(outputs)
+    else:
+        probabilities = torch.softmax(outputs, dim=1)
+        if probabilities.dim() > 1:
+            probabilities = probabilities.squeeze()
+    return probabilities
+
+
+def get_predictions(outputs, task, config):
+    if task == "regression":
+        return outputs.detach().view(-1).cpu().numpy()
+    elif task == "classification":
+        if config["num_classes"] <= 2:
+            if outputs.ndim > 1 and outputs.shape[1] == 2:
+                outputs = outputs[:, 1]  # Use the second column for binary classification
+            elif outputs.ndim > 1 and outputs.shape[1] == 1:
+                outputs = outputs.squeeze()  # Squeeze the dimension
+            return torch.sigmoid(outputs).detach().cpu().numpy()
+        else:
+            return torch.softmax(outputs, dim=1).detach().cpu().numpy()
+
+
+def backpropagate(optimizer, scaler, loss):
+    optimizer.zero_grad()
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
 
 
 # Define additional helper functions for computing loss
@@ -1272,6 +1285,8 @@ def compute_regression_loss(outputs, targets, model_loss):
 def compute_classification_loss(outputs, targets, model_loss, weights):
     if model_loss == "bce_logit_loss":
         criterion = torch.nn.BCEWithLogitsLoss(weight=weights)
+        if outputs.dim() > 1 and outputs.size(1) == 2:
+            outputs = outputs[:, 1]  # Select the second item for binary classification
     elif model_loss == "ce_loss":
         criterion = torch.nn.CrossEntropyLoss(weight=weights)
         outputs = outputs.squeeze()
@@ -1486,14 +1501,16 @@ def save_predictions_to_csv(df_predictions, config, split):
 
     current_date = datetime.datetime.now().strftime("%Y%m%d")
 
-    model_dir = os.path.basename(
-        os.path.dirname(config.get("model_path") or config["output_dir"])
-    )
-    filename = f"{model_dir}{'/' if not model_dir.endswith('/') else ''}{split}_predictions_{current_date}.csv"
-    output_path = os.path.join(config["output_dir"], filename)
+    model_dir = os.path.basename(config.get("model_path") or config["output_dir"])
 
-    # create the output directory if it doesn't exist
-    os.makedirs(config["output_dir"], exist_ok=True)
+    filename = f"{split}_predictions.csv"
+    if config["output_dir"] != model_dir:
+        output_path = os.path.join(config["output_dir"], model_dir, filename)
+    else:
+        output_path = os.path.join(config["output_dir"], filename)
+
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     print(f"Saving predictions to {output_path}")
     df_predictions.to_csv(output_path)

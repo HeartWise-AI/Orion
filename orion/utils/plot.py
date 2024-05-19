@@ -973,9 +973,14 @@ def update_classification_metrics(metrics, preds, target, num_classes):
         >>> num_classes = 2
         >>> update_classification_metrics(metrics, preds, target, num_classes)"""
     # print(list(metrics.keys()))
+
     if num_classes <= 2:
         # Update for Binary Classification
         metrics["auc"].update(preds, target.int())
+        if preds.ndim > 1 and preds.shape[1] == 2:  # Check if preds have two columns
+            preds = preds[:, 1]  # Use the second column for binary classification
+        elif preds.ndim > 1 and preds.shape[1] == 1:  # Check if preds have one column
+            preds = preds.squeeze()  # Squeeze the dimension
         metrics["confmat"].update((preds > 0.5).int(), target.int())
     else:
         # Update for Multi-Class Classification
@@ -1007,15 +1012,57 @@ def compute_classification_metrics(metrics):
 
     computed_metrics = {}
     for metric_name, metric in metrics.items():
-        computed_value = metric.compute()
+        try:
+            # Compute the metric value
+            computed_value = metric.compute()
 
-        # Check if tensor has a single element
-        if computed_value.numel() == 1:
-            computed_metrics[metric_name] = computed_value.item()
-        else:
-            # Convert to a floating point tensor before taking the mean
-            computed_value_float = computed_value.type(torch.float32)
-            computed_metrics[metric_name] = computed_value_float.mean().item()
+            # Check if tensor has a single element
+            if computed_value.numel() == 1:
+                computed_metrics[metric_name] = computed_value.item()
+            else:
+                # Convert to a floating point tensor before taking the mean
+                computed_value_float = computed_value.type(torch.float32)
+                computed_metrics[metric_name] = computed_value_float.mean().item()
+        except Exception as e:
+            print(f"Error computing metric {metric_name}: {e}")
+            # Add more detailed debugging information
+            print(f"Metric state: {metric.state_dict()}")
+            raise e
+
+    # Reset the metrics after computation
+    for metric in metrics.values():
+        metric.reset()
+
+    return computed_metrics
+    """
+    Computes classification metrics based on the provided metrics dictionary.
+
+    Args:
+        metrics (dict): A dictionary containing the metrics to compute.
+
+    Returns:
+        computed_metrics (dict): A dictionary containing the computed classification metrics.
+
+    Examples:
+        >>> metrics = {'accuracy': Accuracy(), 'precision': Precision()}
+        >>> computed_metrics = compute_classification_metrics(metrics)
+    """
+
+    computed_metrics = {}
+    for metric_name, metric in metrics.items():
+        try:
+            computed_value = metric.compute()
+
+            # Check if tensor has a single element
+            if computed_value.numel() == 1:
+                computed_metrics[metric_name] = computed_value.item()
+            else:
+                # Convert to a floating point tensor before taking the mean
+                computed_value_float = computed_value.type(torch.float32)
+                computed_metrics[metric_name] = computed_value_float.mean().item()
+        except Exception as e:
+            print(f"Error computing metric {metric_name}: {e}")
+            raise e
 
     for metric in metrics.values():
         metric.reset()
