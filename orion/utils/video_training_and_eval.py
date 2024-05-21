@@ -594,11 +594,11 @@ def run_training_or_evaluate_orchestrator(
         # Generate and save prediction dataframe
         print("Generating predictions dataframe")
         print(phase)
-        if phase == "val":
+        if phase == "val" and (best_metrics["best_loss"] <= loss):
             df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
             )
-            save_predictions_to_csv(df_predictions, config, phase)
+            save_predictions_to_csv(df_predictions, config, phase, epoch)
 
     return best_metrics
 
@@ -1436,7 +1436,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
         filenames, split_yhat, task, split, config, split_y
     )
 
-    save_predictions_to_csv(df_predictions, config, split)
+    save_predictions_to_csv(df_predictions, config, split, "inference")
 
     return df_predictions
 
@@ -1496,24 +1496,31 @@ def format_dataframe_predictions(filenames, split_yhat, task, split, config, spl
     return df_predictions
 
 
-def save_predictions_to_csv(df_predictions, config, split):
+def save_predictions_to_csv(df_predictions, config, split, epoch):
     import datetime
 
     current_date = datetime.datetime.now().strftime("%Y%m%d")
 
     model_dir = os.path.basename(config.get("model_path") or config["output_dir"])
 
-    filename = f"{split}_predictions.csv"
+    filename = f"{split}_predictions_epoch_{epoch}.csv"
+    best_filename = f"{split}_predictions_epoch_best.csv"
+
     if config["output_dir"] != model_dir:
         output_path = os.path.join(config["output_dir"], model_dir, filename)
+        best_output_path = os.path.join(config["output_dir"], model_dir, best_filename)
     else:
         output_path = os.path.join(config["output_dir"], filename)
+        best_output_path = os.path.join(config["output_dir"], best_filename)
 
     # Ensure the directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     print(f"Saving predictions to {output_path}")
     df_predictions.to_csv(output_path)
+
+    print(f"Saving best predictions to {best_output_path}")
+    df_predictions.to_csv(best_output_path)
 
 
 def create_transforms(config):
