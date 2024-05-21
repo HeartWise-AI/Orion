@@ -1158,7 +1158,7 @@ def train_or_evaluate_epoch(
                         config,
                     )
 
-                predictions.extend(get_predictions(outputs, task, config))
+                predictions.extend(get_predictions_during_training(outputs, task, config))
                 targets.extend(outcomes.detach().cpu().numpy())
 
                 if is_training:
@@ -1225,7 +1225,7 @@ def get_probabilities(outputs, config):
     return probabilities
 
 
-def get_predictions(outputs, task, config):
+def get_predictions_during_training(outputs, task, config):
     if task == "regression":
         return outputs.detach().view(-1).cpu().numpy()
     elif task == "classification":
