@@ -1285,6 +1285,8 @@ def compute_regression_loss(outputs, targets, model_loss):
 def compute_classification_loss(outputs, targets, model_loss, weights):
     if model_loss == "bce_logit_loss":
         criterion = torch.nn.BCEWithLogitsLoss(weight=weights)
+        if outputs.dim() > 1 and outputs.size(1) == 1:
+            outputs = outputs.squeeze()
         if outputs.dim() > 1 and outputs.size(1) == 2:
             outputs = outputs[:, 1]  # Select the second item for binary classification
     elif model_loss == "ce_loss":
