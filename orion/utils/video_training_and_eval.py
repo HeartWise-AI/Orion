@@ -229,6 +229,10 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             "test": initialize_classification_metrics(num_classes, device),
         }
         class_weights = config.get("class_weights", None)
+        if class_weights is not None and len(class_weights) != num_classes:
+            raise ValueError(
+                f"Length of class_weights ({len(class_weights)}) does not match num_classes ({num_classes})."
+            )
 
         if config["class_weights"] is None:
             print("Not using weighted sampling and not using class weights specified in config")
@@ -1285,10 +1289,11 @@ def compute_regression_loss(outputs, targets, model_loss):
 
 
 def compute_classification_loss(outputs, targets, model_loss, weights):
+    #    print(f"Outputs shape before processing: {outputs.shape}")  # Debug print
+    #    print(f"Targets shape before processing: {targets.shape}")  # Debug print
+
     if model_loss == "bce_logit_loss":
         criterion = torch.nn.BCEWithLogitsLoss(weight=weights)
-        if outputs.dim() > 1 and outputs.size(1) == 1:
-            outputs = outputs.squeeze()
         if outputs.dim() > 1 and outputs.size(1) == 2:
             outputs = outputs[:, 1]  # Select the second item for binary classification
         elif outputs.dim() > 1 and outputs.size(1) == 1:
@@ -1299,6 +1304,9 @@ def compute_classification_loss(outputs, targets, model_loss, weights):
         targets = targets.squeeze().long()
     else:
         raise NotImplementedError(f"Loss type '{model_loss}' not implemented.")
+
+    #    print(f"Outputs shape after processing: {outputs.shape}")  # Debug print
+    #    print(f"Targets shape after processing: {targets.shape}")  # Debug print
 
     return criterion(outputs, targets)
 
