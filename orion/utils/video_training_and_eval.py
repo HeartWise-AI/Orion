@@ -1146,6 +1146,8 @@ def train_or_evaluate_epoch(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
                     outputs = model(data)
+                    print("Outputs", outputs.shape)
+                    print("Outcomes", outcomes.shape)
                     loss = compute_loss_and_update_metrics(
                         outputs,
                         outcomes,
@@ -1289,6 +1291,8 @@ def compute_classification_loss(outputs, targets, model_loss, weights):
             outputs = outputs.squeeze()
         if outputs.dim() > 1 and outputs.size(1) == 2:
             outputs = outputs[:, 1]  # Select the second item for binary classification
+        elif outputs.dim() > 1 and outputs.size(1) == 1:
+            outputs = outputs.squeeze()  # Squeeze the dimension
     elif model_loss == "ce_loss":
         criterion = torch.nn.CrossEntropyLoss(weight=weights)
         outputs = outputs.squeeze()
