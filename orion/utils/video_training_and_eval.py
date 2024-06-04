@@ -222,17 +222,19 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             "test": initialize_regression_metrics(device),
         }
     elif config["task"] == "classification":
-        num_classes = 2 if config["num_classes"] <= 2 else config["num_classes"]
+        num_classes = config["num_classes"]
         metrics = {
             "train": initialize_classification_metrics(num_classes, device),
             "val": initialize_classification_metrics(num_classes, device),
             "test": initialize_classification_metrics(num_classes, device),
         }
         class_weights = config.get("class_weights", None)
-        if class_weights is not None and len(class_weights) != num_classes:
-            raise ValueError(
-                f"Length of class_weights ({len(class_weights)}) does not match num_classes ({num_classes})."
-            )
+
+        if class_weights:
+            if len(class_weights) != num_classes:
+                raise ValueError(
+                    f"Length of class_weights ({len(class_weights)}) does not match num_classes ({num_classes})."
+                )
 
         if config["class_weights"] is None:
             print("Not using weighted sampling and not using class weights specified in config")
@@ -244,6 +246,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             weights = weights.to(device)
         else:
             print("Using class weights specified in config", class_weights)
+            print(len(class_weights))
             weights = torch.tensor(class_weights, dtype=torch.float32)
             weights = weights.to(device)
     else:
