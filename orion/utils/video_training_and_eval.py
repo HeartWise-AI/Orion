@@ -223,6 +223,11 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         }
     elif config["task"] == "classification":
         num_classes = config["num_classes"]
+        if num_classes == 2 and config["loss"] == "bce_logit_loss":
+            raise ValueError(
+                "Binary classification with BCEWithLogitsLoss is not supported with num_classes set to 2. Consider using a different loss function or adjusting num_classes to 1."
+            )
+
         metrics = {
             "train": initialize_classification_metrics(num_classes, device),
             "val": initialize_classification_metrics(num_classes, device),
@@ -551,7 +556,7 @@ def run_training_or_evaluate_orchestrator(
             )
 
     elif task == "classification":
-        if config["num_classes"] <= 2:
+        if config["num_classes"] <= 2 and config["loss"] == "bce_logit_loss":
             final_metrics = compute_classification_metrics(metrics[phase])
             optimal_thresh = compute_optimal_threshold(y, yhat)
             pred_labels = (yhat > optimal_thresh).astype(int)
@@ -1201,7 +1206,9 @@ def compute_loss_and_update_metrics(
         loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
         metrics[phase].update(outputs, outcomes)
     elif task == "classification":
-        loss = compute_classification_loss(outputs, outcomes, model_loss, weights).cuda(device)
+        loss = compute_classification_loss(outputs, outcomes, model_loss, weights, config).cuda(
+            device
+        )
         probabilities = get_probabilities(outputs, config)
         update_classification_metrics(
             metrics[phase], probabilities, outcomes, config["num_classes"]
@@ -1291,9 +1298,9 @@ def compute_regression_loss(outputs, targets, model_loss):
         raise NotImplementedError(f"Loss type '{model_loss}' not implemented.")
 
 
-def compute_classification_loss(outputs, targets, model_loss, weights):
-    #    print(f"Outputs shape before processing: {outputs.shape}")  # Debug print
-    #    print(f"Targets shape before processing: {targets.shape}")  # Debug print
+def compute_classification_loss(outputs, targets, model_loss, weights, config):
+    # print(f"Outputs shape before processing: {outputs.shape}")  # Debug print
+    # print(f"Targets shape before processing: {targets.shape}")  # Debug print
 
     if model_loss == "bce_logit_loss":
         criterion = torch.nn.BCEWithLogitsLoss(weight=weights)
@@ -1308,8 +1315,8 @@ def compute_classification_loss(outputs, targets, model_loss, weights):
     else:
         raise NotImplementedError(f"Loss type '{model_loss}' not implemented.")
 
-    #    print(f"Outputs shape after processing: {outputs.shape}")  # Debug print
-    #    print(f"Targets shape after processing: {targets.shape}")  # Debug print
+    # print(f"Outputs shape after processing: {outputs.shape}")  # Debug print
+    # print(f"Targets shape after processing: {targets.shape}")  # Debug print
 
     return criterion(outputs, targets)
 
