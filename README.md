@@ -65,7 +65,7 @@ See `notebooks/config/` for different config.YAML file examples.
 - task: The task type (regression or classification).
 - num_classes: The number of classes for classification.
 - scheduler_type: The type of scheduler to use.
-- factor: The factor for the scheduler.
+- factor: The factor for the scheduler determining how much you reduce the LR. if 0.5 you reduce it by half.
 - patience: The patience for the scheduler.
 - threshold: The threshold for the scheduler.
 - lr_step_period: The learning rate step period for the scheduler.
@@ -74,10 +74,10 @@ See `notebooks/config/` for different config.YAML file examples.
 - project: The project name for the run.
 - entity: The entity name for the run.
 - resume: Whether to resume training from a checkpoint.
-- rand_augment: Whether to use random augmentation.
-- resize: The size to resize the images to.
-- apply_mask: Whether to apply a mask to the images.
-- view_count: The view count for the images.
+- rand_augment: Whether to use random data augmentation. 
+- resize: The size to resize the video to.
+- apply_mask: Whether to apply a mask section to the videos to hide patient information.
+- view_count: The view count for the videos for multi-view classification.
 - save_best: The metric to use for saving the best model.
 - metrics_control: The metrics control parameters.
 - transforms: The transforms to apply to the image
