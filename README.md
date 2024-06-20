@@ -37,30 +37,30 @@ See `notebooks/config/` for different config.YAML file examples.
 
 ```
 - num_epochs: The number of epochs for training.
-- model_name: The name of the model to use.
-- model_path: The path to the model file. If this is set to null, a new model will be created.
+- model_name: The architecture of the model to use. We use torchvision such 'x3d', 'r2+1d', or 'swin3d'. They are initializd with the Kinetics 400 weights.
+- model_path: The path to the model file for retraining the model. If this is set to null, a new model will be created.
 - use_amp: Whether to use automatic mixed precision for training. This can speed up training on GPUs.
 - data_filename: The path to the data file. The data needs to be split using the alpha character : α - this is to prevent commas present in text reports for wrongly splitting the row.
 - root: The root directory for the data.
 - target_label: The label to predict.
-- datapoint_loc_label: The label for the data point location.
-- label_loc_label: The label for the label location.
-- binary_threshold: The threshold for binary classification.
-- frames: The number of frames to use for video data.
+- datapoint_loc_label: The label for the data point location of the MP4 or video files.
+- label_loc_label: The definition of each label in textual format (i.e. normal or reduced).
+- binary_threshold: The threshold for binary classification in a regression.
+- frames: The number of frames to use for video data. If set to 32, it goes from frame 0 to 32 of the video.
 - device: The device to use for training (e.g., cuda for GPU, cpu for CPU).
-- period: The period for the scheduler.
+- period: How many frames you sample. If 1 it samples all frames up to "frames" parameter, if 2 it samples every other frame (0, 2, 4, 6).
 - pretrained: Whether to use a pretrained model.
 - output: The output directory for the model.
 - n_train_patients: The number of patients to use for training.
 - seed: The random seed for reproducibility.
 - optimizer: The optimizer to use for training.
 - weight_decay: The weight decay for the optimizer.
-- num_workers: The number of workers for data loading.
+- num_workers: The number of workers ("processes") for data loading.
 - batch_size: The batch size for training.
 - lr: The learning rate for the optimizer.
 - label_smoothing: Whether to use label smoothing.
 - label_smoothing_value: The value for label smoothing.
-- class_weights: The weights for the classes.
+- class_weights: The weights for the classes if imbalanced datasets. Put them as a dictionary [0, 2, 3] or a single value for binary classification [3]
 - loss: The loss function to use.
 - task: The task type (regression or classification).
 - num_classes: The number of classes for classification.
