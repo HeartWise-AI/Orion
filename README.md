@@ -91,6 +91,22 @@ See `notebooks/config/` for different config.YAML file examples.
 
 `torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config notebooks/config/config.yaml`
 
+The command you provided is used to run a distributed training or evaluation script using PyTorch's `torchrun` utility. Here’s a detailed breakdown of the command:
+
+1. **`torchrun`**: This is a utility provided by PyTorch to run distributed training scripts. It handles the initialization and execution of distributed training processes.
+
+2. **`--standalone`**: This flag indicates that the script will run in a standalone mode, meaning it will not connect to an external cluster or other nodes.
+
+3. **`--nnodes=1`**: This specifies the number of nodes (or clusters) to use for the training. In this case, it is set to 1, indicating that the script will run on a single node.
+
+4. **`--nproc-per-node=2`**: This specifies the number of processes (or GPUs) to run on each node. Here, it is set to 2, meaning that 2 processes will be run on the single node specified by `--nnodes`.
+
+5. **`orion/utils/video_training_and_eval.py`**: This is the path to the Python script that will be executed. This script likely contains the logic for training and evaluating a model.
+
+6. **`--config notebooks/config/config.yaml`**: This is an argument passed to the script, specifying the path to a configuration file (`config.yaml`). This configuration file typically contains settings and hyperparameters needed for the training and evaluation process.
+
+In summary, this command runs the `video_training_and_eval.py` script in a distributed manner with 2 GPU processes on a single node, using the configuration specified in `config.yaml`.
+
 ### Using a Jupyter Notebook
 
 1. Prepare your configuration file in YAML format as described above.
