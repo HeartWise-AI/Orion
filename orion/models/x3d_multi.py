@@ -190,7 +190,7 @@ class X3D_multi(nn.Module):
         )  # convolve over third dimension. nchw -> convolve h, T = output
 
         self.conv7 = nn.Conv3d(
-            1024,
+            4096,
             8192,
             kernel_size=(3, 3, 3),  # might want to make (1, 1)
             padding=(1, 1, 1),
@@ -305,6 +305,7 @@ class X3D_multi(nn.Module):
             z = self.relu(z)
             if i == 1:
                 z1 = z
+                print("z1 shape", z1.shape)
                 z_combined = torch.stack(
                     [z0, z1], dim=2
                 )  # change variable name to avoid confusion
@@ -326,6 +327,7 @@ class X3D_multi(nn.Module):
                 fy_ntcvhw = fy_ntvchw.permute((0, 1, 3, 2, 4, 5))
                 fy_nuvhw = torch.flatten(fy_ntcvhw, start_dim=1, end_dim=2)
                 yfy_nuvhw = self.conv7(fy_nuvhw)
+                print(fy_ntcvhw.shape)
                 yfy_ntcvhw = yfy_nuvhw.reshape(
                     torch.Size(
                         [

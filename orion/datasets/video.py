@@ -29,7 +29,7 @@ class Video(torch.utils.data.Dataset):
         split (str): Dataset split to use ('train', 'val', 'test'). Defaults to 'train'.
         target_label (str): Name of the target label column. Defaults to None.
         datapoint_loc_label (str): Column name for file paths. Defaults to 'FileName'.
-        resize (int): Size to resize videos to (height, width). Defaults to 224.
+        -ize (int): Size to resize videos to (height, width). Defaults to 224.
         mean (float or np.array): Channel-wise means for normalization. Defaults to 0.0.
         std (float or np.array): Channel-wise stds for normalization. Defaults to 1.0.
         length (int): Number of frames to clip from the video. Defaults to 32.
@@ -417,6 +417,7 @@ class Video_Multi(torch.utils.data.Dataset):
         num_classes=None,
         target_transform=None,
         external_test_location=None,
+        weighted_sampling=False,
         debug=False,
         normalize=True,
     ) -> None:
@@ -443,15 +444,16 @@ class Video_Multi(torch.utils.data.Dataset):
         self.resize = resize
         self.view_count = view_count
         self.debug = debug
+        self.weighted_sampling = weighted_sampling
+        self.normalize = normalize
 
-        self.fnames, self.outcome, self.artery_label = [], [], []
+        self.fnames, self.outcome = [], []
 
         df_dataset = pd.read_csv(os.path.join(self.folder, self.filename), sep="α")
         view_countIndex = df_dataset.columns.get_loc(self.view_count)
         filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
         splitIndex = df_dataset.columns.get_loc("Split")
         target_index = df_dataset.columns.get_loc(target_label)
-        artery_index = df_dataset.columns.get_loc("artery_label")
 
         for _, row in df_dataset.iterrows():
             view_count = int(row[view_countIndex])
@@ -465,7 +467,7 @@ class Video_Multi(torch.utils.data.Dataset):
             fileMode = row[splitIndex].lower()
             fileName = [row[i] for i in filenameIndex]
             outcomes = [row[i] for i in outcomeIndex]
-            arteryLabels = row[artery_index]
+
             ##Append all files to file_vids array
             file_vids = [
                 i for i in fileName if self.split in ["all", fileMode] and os.path.exists(i)
@@ -473,17 +475,28 @@ class Video_Multi(torch.utils.data.Dataset):
             if len(file_vids) > 1:
                 self.fnames.append(file_vids)
                 self.outcome.append(outcomes)
-                self.artery_label.append(arteryLabels)
         if self.debug:
             print(self.fnames)
             print(len(self.fnames))
-            # print(self.outcome)
-            # print(len(self.outcome))
-            print(self.artery_label)
-            print(len(self.artery_label))
+            print(self.outcome)
+            print(len(self.outcome))
 
         self.frames = collections.defaultdict(list)
         self.trace = collections.defaultdict(_defaultdict_of_lists)
+
+        if self.weighted_sampling is True:
+            # define weights for weighted sampling
+            labels = np.array(
+                [self.outcome[ind][target_index] for ind in range(len(self.outcome))], dtype=int
+            )
+
+            # binary weights length == 2
+            weights = 1 - (np.bincount(labels) / len(labels))
+            self.weight_list = np.zeros(len(labels))
+
+            for label in range(len(weights)):
+                weight = weights[label]
+                self.weight_list[np.where(labels == label)] = weight
 
     #         # define weights for weighted sampling
     #         labels = np.array([self.outcome[ind][target_index] for ind in range(len(self.outcome))], dtype=int)
@@ -542,8 +555,9 @@ class Video_Multi(torch.utils.data.Dataset):
         #       apply normalization before augmentaiton per riselab and torchvision
 
         # If self.mean and self.std are defined, apply normalization
-        if hasattr(self, "mean") and hasattr(self, "std"):
-            video = v2.Normalize(self.mean, self.std)(video)
+        if self.normalize == True:
+            if hasattr(self, "mean") and hasattr(self, "std"):
+                video = v2.Normalize(self.mean, self.std)(video)
 
         # if self.debug is True:
         #    self.plot_middle_frame(video, "after normalize", index)
@@ -640,7 +654,6 @@ class Video_Multi(torch.utils.data.Dataset):
                 return vids_stack, filenames
             else:
                 targets = []
-                artery_label_list = []
                 # print(self.fnames[index])
                 for count, i in enumerate(self.fnames[index]):
                     # print(len(self.fnames[index]))
@@ -649,13 +662,13 @@ class Video_Multi(torch.utils.data.Dataset):
                     vids_stack.append(video)
                     target = Video_Multi.make_targets(self, index)
                     targets.append(target)
-                    artery_label_list.append(np.float32(self.artery_label[index]))
                     filenames.append(i)
+
                 # print("Targets 1,1", targets[1][1])
                 # print("Vids_stack", len(vids_stack))
                 # print("Filenames Video.py", filenames)
 
-                return vids_stack, targets[1][1], filenames, artery_label_list[0]
+                return vids_stack, targets[1][1], filenames
 
                 # return vids_stack, targets[1][1]
 

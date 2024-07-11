@@ -97,6 +97,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     # set the device
     total_devices = torch.cuda.device_count()
+    if total_devices == 0:
+        raise RuntimeError("No CUDA devices available. This script requires CUDA.")
     device = torch.device(args.local_rank % total_devices)
     print("Total devices", total_devices)
     print("Device ", device)
@@ -393,7 +395,6 @@ def setup_config(config, transforms, is_master, run):
         pathlib.Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
         wandb.config.update(config, allow_val_change=True)
         print("output_folder created", config["output_dir"])
-
     if config["view_count"] is None:
         print("Loading with 1 view count for mean and std")
         if (
@@ -402,7 +403,7 @@ def setup_config(config, transforms, is_master, run):
             or (config["mean"] is None)
             or (config["std"] is None)
         ):
-            ## Load a datswet for normalization
+            ## Load a dataset for normalization
             mean, std = orion.utils.get_mean_and_std(
                 orion.datasets.Video(
                     root=config["root"],
@@ -420,6 +421,44 @@ def setup_config(config, transforms, is_master, run):
             )
             print("Mean", mean)
             print("Std", std)
+
+            config["mean"] = mean
+            config["std"] = std
+            if is_master:
+                wandb.config.update(
+                    {
+                        "mean": config["mean"],
+                        "std": config["std"],
+                        "output_dir": config["output_dir"],
+                    },
+                    allow_val_change=True,
+                )
+        else:
+            print("Using mean and std from config", config["mean"], config["std"])
+    else:
+        print(f"Loading with {config['view_count']} view count for mean and std")
+        if (
+            ("mean" not in config)
+            or ("std" not in config)
+            or (config["mean"] is None)
+            or (config["std"] is None)
+        ):
+            ## Load a dataset for normalization
+            mean, std = orion.utils.multi_get_mean_and_std(
+                orion.datasets.Video_Multi(
+                    root=config["root"],
+                    split="train",
+                    target_label=config["target_label"],
+                    data_filename=config["data_filename"],
+                    datapoint_loc_label=config["datapoint_loc_label"],
+                    video_transforms=None,
+                    resize=config["resize"],
+                    weighted_sampling=False,
+                    normalize=False,
+                ),
+                batch_size=config["batch_size"],
+                num_workers=config["num_workers"],
+            )
 
             config["mean"] = mean
             config["std"] = std
@@ -766,20 +805,21 @@ def build_model(config, device, model_path=None, for_inference=False):
         torch.nn.Module: Initialized model.
     """
     # Instantiate model based on configuration
-    print(config["task"])
-    print(config["num_classes"])
 
     if config["model_name"] == "x3d":
         model = x3d(num_classes=config["num_classes"], task=config["task"])
     elif config["model_name"] == "x3d_legacy":
-        print("Using legacy X3d model with extra regression fc2 layer")
         model = x3d_legacy(num_classes=config["num_classes"], task=config["task"])
+    if config["model_name"] == "x3d_multi":
+        model = x3d_multi(num_classes=config["num_classes"])
     elif config["model_name"] == "pyvid_multiclass_x3d":
         model = pyvid_multiclass_x3d(num_classes=config["num_classes"], resize=config["resize"])
     elif config["model_name"] == "timesformer":
         model = timesformer(num_classes=config["num_classes"], resize=config["resize"])
     elif config["model_name"] == "stam":
         model = stam(num_classes=config["num_classes"], resize=config["resize"])
+    elif config["model_name"] == "videopairclassifier":
+        model = VideoPairClassifier(num_classes=config["num_classes"])
     elif config["model_name"] == "vivit":
         model = vivit(
             num_classes=config["num_classes"],
@@ -819,11 +859,30 @@ def build_model(config, device, model_path=None, for_inference=False):
 
     # Add the new classification feature
     if config["task"] == "classification":
+        # Attempt to read the CSV file with the specified separator
         dataset = pd.read_csv(
             os.path.join(config["data_filename"]),
             sep="α",
             engine="python",
         )
+
+        # Check if the DataFrame has only one column
+        if len(dataset.columns) == 1:
+            print("Warning: Only one column detected. The separator might be incorrect.")
+            # Try to read the CSV file again with a comma as the separator
+            dataset = pd.read_csv(
+                os.path.join(config["data_filename"]),
+                sep=",",
+                engine="python",
+            )
+            # Check if the new DataFrame has more than one column
+            if len(dataset.columns) > 1:
+                print("Successfully read the CSV file using comma as the separator.")
+            else:
+                print(
+                    "Error: Unable to correctly parse the CSV file. Please check the file format and separator."
+                )
+
         # Adjust labels_map initialization based on num_classes
         if config["num_classes"] == 1:
             labels_map = {0: 0, 1: 1}
@@ -1148,7 +1207,19 @@ def train_or_evaluate_epoch(
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
             for data, outcomes, fname in dataloader:
-                data, outcomes = data.to(device), outcomes.to(device)
+                if config["view_count"] is None:
+                    data = data.to(device)
+                    outcomes = outcomes.to(device)
+
+                    if config["model_name"] in ["timesformer", "stam"]:
+                        data = data.permute(0, 2, 1, 3, 4)
+                else:
+                    data = torch.stack(data, dim=1)
+                    data = data.to(device)
+                    outcomes = outcomes.to(device)
+
+                    if config["model_name"] in ["timesformer", "stam"]:
+                        data = data.permute(0, 1, 3, 2, 4, 5)
                 filenames.extend(fname)
 
                 if config.get("block_size") is not None and len(data.shape) == 5:
@@ -1158,8 +1229,6 @@ def train_or_evaluate_epoch(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
                     outputs = model(data)
-                    print("Outputs", outputs.shape)
-                    print("Outcomes", outcomes.shape)
                     loss = compute_loss_and_update_metrics(
                         outputs,
                         outcomes,

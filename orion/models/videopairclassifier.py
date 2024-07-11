@@ -36,6 +36,9 @@ class SelfAttention(nn.Module):
         return attention_weights @ V
 
 
+import torch._dynamo
+
+
 class VideoPairClassifier(nn.Module):
     def __init__(self, num_classes=2):
         super().__init__()
@@ -43,45 +46,47 @@ class VideoPairClassifier(nn.Module):
         self.video_feature_extractor = models.video.r3d_18(pretrained=True)
         self.video_feature_extractor.fc = nn.Identity()
 
-        for param in self.video_feature_extractor.parameters():
-            param.requires_grad = True
+        # Freeze the first few layers of the feature extractor
+        for name, param in self.video_feature_extractor.named_parameters():
+            if "layer3" not in name and "layer4" not in name:
+                param.requires_grad = False
 
-        self.attention1 = SelfAttention(512)
-        self.attention2 = SelfAttention(512)
+        self.attention = nn.MultiheadAttention(512, num_heads=8)
 
-        self.fc1 = nn.Linear(1536, 512)
+        self.fc1 = nn.Linear(1024, 512)
         self.fc2 = nn.Linear(512, num_classes)
-        self.fc_artery = nn.Linear(11, 512)
 
         self.dropout = nn.Dropout(p=0.5)
+        self.layer_norm = nn.LayerNorm(512)
 
-    def forward(self, x, x_artery_label):
-        num_pairs = x.shape[0]
-        outputs = []
+    @torch._dynamo.disable
+    def forward(self, x):
+        batch_size = x.shape[0]
+        x1, x2 = x[:, 0], x[:, 1]  # Assume x has shape (batch_size, 2, C, T, H, W)
 
-        for i in range(num_pairs):
-            x1, x2 = x[i]
+        video1_features = self.video_feature_extractor(x1)
+        video2_features = self.video_feature_extractor(x2)
 
-            x1 = x1.float()
-            x2 = x2.float()
+        # Reshape for attention: (seq_len, batch_size, feature_dim)
+        video1_features = video1_features.unsqueeze(0)
+        video2_features = video2_features.unsqueeze(0)
 
-            video1_features = self.video_feature_extractor(x1.unsqueeze(0))
-            video2_features = self.video_feature_extractor(x2.unsqueeze(0))
+        # Apply attention
+        video1_features, _ = self.attention(video1_features, video1_features, video1_features)
+        video2_features, _ = self.attention(video2_features, video2_features, video2_features)
 
-            video1_features = self.attention1(video1_features)
-            video2_features = self.attention2(video2_features)
+        # Reshape back: (batch_size, feature_dim)
+        video1_features = video1_features.squeeze(0)
+        video2_features = video2_features.squeeze(0)
 
-            artery_features = self.fc_artery(x_artery_label[i].float()).unsqueeze(0)
+        # Concatenate features
+        combined_features = torch.cat((video1_features, video2_features), dim=1)
 
-            pair_features = torch.cat((video1_features, video2_features, artery_features), dim=1)
+        # Fully connected layers
+        out = self.fc1(combined_features)
+        out = self.layer_norm(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
 
-            out = self.fc1(pair_features)
-            out.relu_()  # In-place ReLU operation
-            out = self.dropout(out)
-            out = self.fc2(out)
-
-            outputs.append(out.squeeze(0))
-
-        outputs = torch.stack(outputs)
-
-        return outputs
+        return out
