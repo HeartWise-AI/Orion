@@ -454,9 +454,8 @@ class Video_Multi(torch.utils.data.Dataset):
         filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
         splitIndex = df_dataset.columns.get_loc("Split")
         target_index = df_dataset.columns.get_loc(target_label)
-
         for _, row in df_dataset.iterrows():
-            view_count = int(row[view_countIndex])
+            view_count = int(row.iloc[view_countIndex])
             filenameIndex = [
                 df_dataset.columns.get_loc(self.datapoint_loc_label + str(i))
                 for i in range(view_count)
@@ -464,9 +463,9 @@ class Video_Multi(torch.utils.data.Dataset):
             outcomeIndex = [
                 df_dataset.columns.get_loc(self.target_label) for _ in range(view_count)
             ]
-            fileMode = row[splitIndex].lower()
-            fileName = [row[i] for i in filenameIndex]
-            outcomes = [row[i] for i in outcomeIndex]
+            fileMode = row.iloc[splitIndex].lower()
+            fileName = [row.iloc[i] for i in filenameIndex]
+            outcomes = [row.iloc[i] for i in outcomeIndex]
 
             ##Append all files to file_vids array
             file_vids = [

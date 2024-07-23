@@ -646,6 +646,15 @@ def run_training_or_evaluate_orchestrator(
         print("Generating predictions dataframe")
         print(phase)
         if phase == "val" and (best_metrics["best_loss"] <= loss):
+            print("Shapes of arrays:")
+            print(f"filenames: {np.array(filenames).shape}")
+            print(filenames)
+            print(f"yhat.squeeze(): {yhat.squeeze().shape}")
+            print(f"y: {np.array(y).shape}")
+            print(f"task: {type(task)}")  # task is a string, not an array
+            print(f"phase: {type(phase)}")  # phase is a string, not an array
+            print(f"config: {type(config)}")  # config is a dictionary, not an array
+
             df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
             )
@@ -819,7 +828,14 @@ def build_model(config, device, model_path=None, for_inference=False):
     elif config["model_name"] == "stam":
         model = stam(num_classes=config["num_classes"], resize=config["resize"])
     elif config["model_name"] == "videopairclassifier":
-        model = VideoPairClassifier(num_classes=config["num_classes"])
+        if "feature_extractor_backbone" not in config:
+            raise ValueError(
+                "feature_extractor_backbone must be defined in the configuration for VideoPairClassifier"
+            )
+        model = VideoPairClassifier(
+            num_classes=config["num_classes"],
+            feature_extractor_backbone=config["feature_extractor_backbone"],
+        )
     elif config["model_name"] == "vivit":
         model = vivit(
             num_classes=config["num_classes"],
@@ -1036,7 +1052,10 @@ def load_dataset(split, config, transforms, weighted_sampling):
                 **kwargs,
             )
     else:
-        dataset = orion.datasets.Video_inference(split=split, **kwargs)
+        if config["view_count"] is None:
+            dataset = orion.datasets.Video_inference(split=split, **kwargs)
+        else:
+            dataset = orion.datasets.Video_Multi_inference(split=split, **kwargs)
 
     return dataset
 
@@ -1066,7 +1085,15 @@ def get_predictions(
                 else:
                     raise ValueError("Unexpected batch structure.")
 
-                data = data.to(device)
+                if config["view_count"] is None:
+                    data = data.to(device)
+                else:
+                    data = torch.stack(data, dim=1)
+                    data = data.to(device)
+
+                if config["model_name"] in ["timesformer", "stam"]:
+                    data = data.permute(0, 1, 3, 2, 4, 5)
+
                 filenames.extend(fname)
                 if outcomes is not None and hasattr(outcomes, "detach"):
                     # Check if outcomes is not empty
