@@ -819,7 +819,7 @@ def build_model(config, device, model_path=None, for_inference=False):
         model = x3d(num_classes=config["num_classes"], task=config["task"])
     elif config["model_name"] == "x3d_legacy":
         model = x3d_legacy(num_classes=config["num_classes"], task=config["task"])
-    if config["model_name"] == "x3d_multi":
+    elif config["model_name"] == "x3d_multi":
         model = x3d_multi(num_classes=config["num_classes"])
     elif config["model_name"] == "pyvid_multiclass_x3d":
         model = pyvid_multiclass_x3d(num_classes=config["num_classes"], resize=config["resize"])

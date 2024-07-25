@@ -216,12 +216,16 @@ def get_pretrained_model(model_name, num_classes=400, task="classification"):
         last_layer_name = get_last_layer_name(model)
         print("The last layer is:", last_layer_name)
 
-        # Assuming 'model' is your pre-loaded model
-        # Define the new linear layer - replace in_features and out_features with appropriate values
-        if task == "regression":
+        # Modify this part to match the swin3d approach
+        if task == "classification":
             new_linear_layer = nn.Linear(in_features=400, out_features=num_classes)
-            # Replace the existing softmax layer with the new linear layer
-            model.blocks[5].activation = new_linear_layer
+            model.blocks[5].proj = new_linear_layer
+            model.blocks[5].activation = nn.Identity()  # Remove any existing activation
+        elif task == "regression":
+            new_linear_layer = nn.Linear(in_features=400, out_features=1)
+            model.blocks[5].proj = new_linear_layer
+            model.blocks[5].activation = nn.Identity()  # Remove any existing activation
+
     elif model_name == "x3d_xs":
         model = get_model("x3d", kwargs)
     elif model_name == "x3d_s":
