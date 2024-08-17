@@ -1609,7 +1609,7 @@ def format_dataframe_predictions(filenames, split_yhat, task, split, config, spl
         df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
     else:
         if "binary_threshold" not in config:
-            raise ValueError("binary_threshold is not defined in the config")
+            print("Warning: binary_threshold is not defined in the config")
         binary_threshold = config.get("binary_threshold", 0.5)
         df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
             lambda x: 1 if x >= binary_threshold else 0
