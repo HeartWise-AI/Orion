@@ -646,14 +646,14 @@ def run_training_or_evaluate_orchestrator(
         print("Generating predictions dataframe")
         print(phase)
         if phase == "val" and (best_metrics["best_loss"] <= loss):
-            print("Shapes of arrays:")
-            print(f"filenames: {np.array(filenames).shape}")
-            print(filenames)
-            print(f"yhat.squeeze(): {yhat.squeeze().shape}")
-            print(f"y: {np.array(y).shape}")
-            print(f"task: {type(task)}")  # task is a string, not an array
-            print(f"phase: {type(phase)}")  # phase is a string, not an array
-            print(f"config: {type(config)}")  # config is a dictionary, not an array
+            # print("Shapes of arrays:")
+            # print(f"filenames: {np.array(filenames).shape}")
+            # print(filenames)
+            # print(f"yhat.squeeze(): {yhat.squeeze().shape}")
+            # print(f"y: {np.array(y).shape}")
+            # print(f"task: {type(task)}")  # task is a string, not an array
+            # print(f"phase: {type(phase)}")  # phase is a string, not an array
+            # sprint(f"config: {type(config)}")  # config is a dictionary, not an array
 
             df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
@@ -1608,7 +1608,9 @@ def format_dataframe_predictions(filenames, split_yhat, task, split, config, spl
                 print("Error converting string to array. Check if the y_hat column is a string.")
         df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
     else:
-        binary_threshold = config["binary_threshold"]
+        if "binary_threshold" not in config:
+            raise ValueError("binary_threshold is not defined in the config")
+        binary_threshold = config.get("binary_threshold", 0.5)
         df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
             lambda x: 1 if x >= binary_threshold else 0
         )
