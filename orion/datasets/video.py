@@ -205,6 +205,7 @@ class Video(torch.utils.data.Dataset):
         video = torch.from_numpy(video)
         if self.resize is not None:
             video = v2.Resize((self.resize, self.resize), antialias=True)(video)
+
         if self.normalize == True:
             if hasattr(self, "mean") and hasattr(self, "std"):
                 video = v2.Normalize(self.mean, self.std)(video)

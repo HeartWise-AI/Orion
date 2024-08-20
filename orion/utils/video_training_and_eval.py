@@ -946,9 +946,9 @@ def build_model(config, device, model_path=None, for_inference=False):
 
         # Ensure map_location has a value before loading the checkpoint
         if map_location:
-            checkpoint = torch.load(model_path, map_location=map_location)
+            checkpoint = torch.load(model_path, map_location=map_location, weights_only=True)
         else:
-            checkpoint = torch.load(model_path)
+            checkpoint = torch.load(model_path, weights_only=True)
         # Uncomment below to debug checkpoint content
         # print("Model checkpoint content:", checkpoint)
         try:
@@ -1172,7 +1172,6 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
         )
 
     # ... [Include other optimizers like RAdam, AdamW, etc.] ...
-
     if config["scheduler_type"] == "plateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optim,
@@ -1184,8 +1183,6 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
             cooldown=0,
             min_lr=0,
             eps=1e-08,
-            verbose=False,
-            # ... [Other scheduler parameters] ...
         )
     elif config["scheduler_type"] == "step":
         scheduler = torch.optim.lr_scheduler.StepLR(
@@ -1196,8 +1193,7 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optim,
             T_0=10,
-            verbose=True,
-            last_epoch=(epoch_resume - 1),
+            last_epoch=(epoch_resume - 1) if epoch_resume is not None else -1,
         )
     else:
         scheduler = None
