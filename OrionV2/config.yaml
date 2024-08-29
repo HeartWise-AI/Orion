@@ -5,14 +5,14 @@ dataset_path: "/media/data1/ravram/CathEF_Retrain/train_val_test_LCA_REGRESSION_
 separator: "α"                            # Options: "," , ";", "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ", "λ", "μ", "ν", "ξ", "ο", "π", "ρ", "σ", "τ", "υ", "φ", "χ", "ψ", "ω".........
 dataset_origin: "MHI_CLIPPED"             # Options: "TESTCASE", "MHI", "UCSF", "BOTH", "UCSF_CLIPPED", "MHI_CLIPPED" --> "TESTCASE": OVERIDES the other parameters and test the code on training the network for white/black video classification
 fps: 0                                    # Options: 0, 15 --> 0: for all FPS
-how_many: 100                             # Options: 0, 100, 200, 300, 400, 500 --> 0: for all data
+how_many: 0                               # Options: 0, 100, 200, 300, 400, 500 --> 0: for all data
 batch_size: 20                            # Options: 8, 16, 32, 64....
 num_workers: 8                            # Options: 4, 8, 16, 32....
 num_epochs: 100                           # Options: 100, 200, 300, 400, 500....
 threshold: 0.4                            # Options: [0:1] --> 0.5 for binary classification
 in_memory: false                          # Options: true, false
 use_wandb: true                           # Options: true, false
-model_name: "x3d_xs"                      # Options: "x3d_xs", "x3d_s", "x3d_m"
+model_name: "x3d_m"                       # Options: "x3d_xs", "x3d_s", "x3d_m"
 pretrained: true                          # Options: true, false
 problem_type: "regression"                # Options: "regression", "classification"
 classes: 1                                # Options: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 .... --> 1 for regression or binary classification
@@ -25,7 +25,7 @@ split_column: "Split"                     # Options: ....
 fps_column: "FPS"                         # Options: ....
 label_normalized: false                   # Options: true, false
 modulo_5: false                           # Options: true, false
-num_frames: 48                                # Options: 32,48,72 ....
+num_frames: 48                            # Options: 32,48,72 ....
 frames_size: 256                          # Options: 182, 224, 256 ....
 lr_scheduler:                             # Options: "ReduceLROnPlateau"
   factor: 0.1
@@ -36,7 +36,7 @@ lr_scheduler:                             # Options: "ReduceLROnPlateau"
 ## INFERENCE PARAMETERS
 INFERENCE_DATASET_PATH: "/media/data1/ravram/CathEF_Retrain/train_val_test_LCA_REGRESSION_with_MHI_2016-to-July-2022_data_NAS_path_alpha.csv"
 INFERENCE_SEPARATOR: "α"
-INFERENCE_DATASET_ORIGIN: "UCSF"
+INFERENCE_DATASET_ORIGIN: "MHI"
 INFERENCE_MODEL_PATH: "/volume/Orion/OrionV2/experiments/x3d_m_MHI_CLIPPED_0_0_RAdam_0.0001_m79ywp"
 INFERENCE_HOW_MANY: 0
 INFERENCE_FPS: 0
