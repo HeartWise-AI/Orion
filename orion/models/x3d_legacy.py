@@ -1,25 +1,9 @@
-"""
-Defining models used for orion
-"""
-import pytorchvideo.models.x3d as ptx3d
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from stam_pytorch import STAM
-from timesformer_pytorch import TimeSformer
-
-from orion.models.config import _C
-from orion.models.feature_model import get_fmodel
-from orion.models.movinet_model import MoViNet
-from orion.models.vivit import ViViT
-from orion.models.x3d_multi import X3D_multi
 
 
 class Swish(nn.Module):
-    """FROM SLOWFAST"""
-
-    """Swish activation function: x * sigmoid(x)."""
-
     def __init__(self):
         super().__init__()
 
@@ -28,10 +12,6 @@ class Swish(nn.Module):
 
 
 class SwishEfficient(torch.autograd.Function):
-    """FROM SLOWFAST"""
-
-    """Swish activation function: x * sigmoid(x)."""
-
     @staticmethod
     def forward(ctx, x):
         result = x * torch.sigmoid(x)
@@ -73,7 +53,7 @@ class Bottleneck(nn.Module):
         self.bn2 = nn.BatchNorm3d(planes[0])
         self.conv3 = conv1x1x1(planes[0], planes[1])
         self.bn3 = nn.BatchNorm3d(planes[1])
-        self.swish = Swish()  # nn.Hardswish()
+        self.swish = Swish()
         self.relu = nn.ReLU(inplace=True)
         if self.index % 2 == 0:
             width = self.round_width(planes[0])
@@ -96,8 +76,7 @@ class Bottleneck(nn.Module):
         return int(width_out)
 
     def forward(self, x):
-        #         pdb.set_trace()
-        residual = x
+        identity = x
 
         out = self.conv1(x)
         out = self.bn1(out)
@@ -105,7 +84,8 @@ class Bottleneck(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
-        # Squeeze-and-Excitation
+        out = self.relu(out)
+
         if self.index % 2 == 0:
             se_w = self.global_pool(out)
             se_w = self.fc1(se_w)
@@ -113,28 +93,20 @@ class Bottleneck(nn.Module):
             se_w = self.fc2(se_w)
             se_w = self.sigmoid(se_w)
             out = out * se_w
-        out = self.swish(out)
 
         out = self.conv3(out)
         out = self.bn3(out)
 
         if self.downsample is not None:
-            residual = self.downsample(x)
+            identity = self.downsample(x)
 
-        out += residual
+        out += identity
         out = self.relu(out)
 
         return out
 
 
 class X3D_legacy(nn.Module):
-    """
-    X3D model with support for classification, regression, and localization tasks.
-
-    This model extends the original X3D architecture to handle multiple task types.
-    Supported tasks: 'classification', 'regression', 'loc' (localization)
-    """
-
     def __init__(
         self,
         block,

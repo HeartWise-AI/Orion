@@ -25,16 +25,7 @@ import tqdm
 
 import orion
 from orion.datasets import Video
-from orion.models import (
-    movinet,
-    pyvid_multiclass_x3d,
-    stam,
-    timesformer,
-    vivit,
-    x3d,
-    x3d_legacy,
-    x3d_multi,
-)
+from orion.models import movinet, stam, timesformer, vivit, x3d_legacy, x3d_multi
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
 from orion.utils.plot import (
@@ -88,7 +79,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     use_amp = config.get("use_amp", False)
     print("Using AMP", use_amp)
     task = config.get("task", "regression")
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     np.random.seed(config["seed"])
     torch.manual_seed(config["seed"])
@@ -802,6 +793,55 @@ def should_update_best_performance(
         raise ValueError(f"Invalid criterion specified: {criterion}. Choose 'loss' or 'auc'.")
 
 
+class RegressionHead(nn.Module):
+    def __init__(self, dim_in=192, num_classes=1):
+        super().__init__()
+        self.fc1 = nn.Conv3d(192, 2048, bias=True, kernel_size=1, stride=1)
+        self.regress = nn.Linear(2048, num_classes)
+
+    def forward(self, x):
+        # x shape: (batch_size, channels, time, height, width)
+        # print("After global_pool shape:", x.shape)  # Assuming dim_in=192: (batch_size, 192, time, height, width)
+
+        # After global_pool shape: torch.Size([8, 192, 72, 8, 8])
+        x = self.fc1(x)  # Shape: (batch_size, 2048, time, height, width)
+        x = x.mean([2, 3, 4])  # Shape: (batch_size, 2048)
+
+        x = self.regress(x)  # Shape: (batch_size, num_classes)
+        # print("Output shape:", x.shape)  # (batch_size, num_classes)
+        return x
+
+
+def replace_final_layer(model, config):
+    """
+    Replace the final layer of the model based on the problem type.
+    """
+    # Find the number of input features for the last layer
+    if hasattr(model.blocks[-1], "proj"):
+        in_features = model.blocks[-1].proj.in_features
+    elif hasattr(model.blocks[-1], "conv"):
+        in_features = model.blocks[-1].conv.out_channels
+    else:
+        raise AttributeError("Unable to determine input features for the final layer")
+
+    if config["task"] == "regression":
+        model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
+        print(
+            f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+        )
+    elif config["task"] == "classification":
+        model.blocks[-1].proj = nn.Linear(
+            in_features=in_features, out_features=config["num_classes"], bias=True
+        )
+        print(
+            f"Replaced final layer with Linear(in_features={in_features}, out_features={config['num_classes']}, bias=True) for classification"
+        )
+    else:
+        raise ValueError(f"Unsupported problem type: {config['task']}")
+
+    return model
+
+
 def build_model(config, device, model_path=None, for_inference=False):
     """
     Build and initialize the model based on the configuration.
@@ -815,63 +855,10 @@ def build_model(config, device, model_path=None, for_inference=False):
     """
     # Instantiate model based on configuration
 
-    if config["model_name"] == "x3d":
-        model = x3d(num_classes=config["num_classes"], task=config["task"])
-    elif config["model_name"] == "x3d_legacy":
-        model = x3d_legacy(num_classes=config["num_classes"], task=config["task"])
-    elif config["model_name"] == "x3d_multi":
-        model = x3d_multi(num_classes=config["num_classes"])
-    elif config["model_name"] == "pyvid_multiclass_x3d":
-        model = pyvid_multiclass_x3d(num_classes=config["num_classes"], resize=config["resize"])
-    elif config["model_name"] == "timesformer":
-        model = timesformer(num_classes=config["num_classes"], resize=config["resize"])
-    elif config["model_name"] == "stam":
-        model = stam(num_classes=config["num_classes"], resize=config["resize"])
-    elif config["model_name"] == "videopairclassifier":
-        if "feature_extractor_backbone" not in config:
-            raise ValueError(
-                "feature_extractor_backbone must be defined in the configuration for VideoPairClassifier"
-            )
-        model = VideoPairClassifier(
-            num_classes=config["num_classes"],
-            feature_extractor_backbone=config["feature_extractor_backbone"],
-        )
-    elif config["model_name"] == "vivit":
-        model = vivit(
-            num_classes=config["num_classes"],
-            resize=config["resize"],
-            num_frames=config["frames"],
-        )
-    elif config["model_name"] in [
-        "c2d_r50",
-        "i3d_r50",
-        "slow_r50",
-        "slowfast_r50",
-        "slowfast_r101",
-        "slowfast_16x8_r101_50_50",
-        "csn_r101",
-        "r2plus1d_r50",
-        "x3d_xs",
-        "x3d_s",
-        "x3d_m",
-        "x3d_l",
-        "mvit_base_16x4",
-        "mvit_base_32x3",
-        "efficient_x3d_xs",
-        "efficient_x3d_s",
-    ]:
-        from orion.models import pytorchvideo_model
+    model = load_and_modify_model(config)
 
-        model = pytorchvideo_model(
-            config["model_name"], config["num_classes"], task=config["task"]
-        )
-    elif config["model_name"] in ["swin3d_s", "swin3d_b"]:
-        from orion.models import get_fmodel, pytorchvideo_model
-
-        # model = get_fmodel(config["model_name"])
-        model = pytorchvideo_model(config["model_name"], config["num_classes"], config["task"])
-    else:
-        print("Error: Model name not found :", config["model_name"])
+    # Print the entire model architecture to verify the changes
+    print("Updated model architecture:", model)
 
     # Add the new classification feature
     if config["task"] == "classification":
