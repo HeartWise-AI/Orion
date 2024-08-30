@@ -106,12 +106,13 @@ def stam(num_classes, resize, **kwargs):
 
 
 class RegressionHead(nn.Module):
-    def __init__(self, dim_in, num_classes=1):
+    def __init__(self, dim_in=192, num_classes=1):
         super().__init__()
-        self.fc1 = nn.Conv3d(dim_in, 2048, bias=True, kernel_size=1, stride=1)
+        self.fc1 = nn.Conv3d(192, 2048, bias=True, kernel_size=1, stride=1)  # 192, 2048, 72, 8, 8
         self.regress = nn.Linear(2048, num_classes)
 
     def forward(self, x):
+        # x shape: (batch_size, channels, time, height, width)
         # print("After global_pool shape:", x.shape)  # Assuming dim_in=192: (batch_size, 192, time, height, width)
 
         # After global_pool shape: torch.Size([8, 192, 72, 8, 8])
@@ -119,6 +120,7 @@ class RegressionHead(nn.Module):
         x = x.mean([2, 3, 4])  # Shape: (batch_size, 2048)
 
         x = self.regress(x)  # Shape: (batch_size, num_classes)
+        # print("Output shape:", x.shape)  # (batch_size, num_classes)
         return x
 
 
