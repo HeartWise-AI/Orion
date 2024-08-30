@@ -25,7 +25,15 @@ import tqdm
 
 import orion
 from orion.datasets import Video
-from orion.models import movinet, stam, timesformer, vivit, x3d_legacy, x3d_multi
+from orion.models import (
+    load_and_modify_model,
+    movinet,
+    stam,
+    timesformer,
+    vivit,
+    x3d_legacy,
+    x3d_multi,
+)
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
 from orion.utils.plot import (
