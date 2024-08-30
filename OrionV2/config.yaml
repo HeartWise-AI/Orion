@@ -37,7 +37,7 @@ lr_scheduler:                             # Options: "ReduceLROnPlateau"
 INFERENCE_DATASET_PATH: "/media/data1/ravram/CathEF_Retrain/train_val_test_LCA_REGRESSION_with_MHI_2016-to-July-2022_data_NAS_path_alpha.csv"
 INFERENCE_SEPARATOR: "α"
 INFERENCE_DATASET_ORIGIN: "MHI"
-INFERENCE_MODEL_PATH: "/volume/Orion/OrionV2/experiments/x3d_m_MHI_CLIPPED_0_0_RAdam_0.0001_m79ywp"
+INFERENCE_MODEL_PATH: "/volume/Orion/OrionV2/experiments/x3d_m_MHI_CLIPPED_0_RAdam_0.0001_SmoothL1Loss_regression_True_48_20_d9se5s"
 INFERENCE_HOW_MANY: 0
 INFERENCE_FPS: 0
 INFERENCE_THRESHOLD: 0.4
@@ -55,5 +55,5 @@ INFERENCE_MODULO_5: false
 INFERENCE_NUM_FRAMES: 48
 INFERENCE_FRAMES_SIZE: 256
 INFERENCE_IN_MEMORY: false
-INFERENCE_STRIDE: 32
+INFERENCE_STRIDE: 48
 

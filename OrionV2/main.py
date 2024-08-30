@@ -28,7 +28,7 @@ if __name__ == "__main__":
     # Initialize wandb conditionally
     if config.use_wandb:
         wandb.init(project="X3D Test", config=config)
-        wandb.run.name = directory
+        wandb.run.name = directory.replace("experiments/", "")
     
     # Load Dataset
     train_dataset = VideoDataset(config, "TRAIN")
