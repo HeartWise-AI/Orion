@@ -148,7 +148,7 @@ def save_metrics(labels_list, predictions_list, exams_list, filenames_list, conf
 
     figROC, axROC = plt.subplots(figsize=(10, 8))
     axROC.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve video level (area = {auc_test:.2f})')
-    axROC.plot(fpr_grouped, tpr_grouped, color='darkblue', lw=2, label=f'ROC curve study level(area = {auc_test_grouped:.2f})')
+    axROC.plot(fpr_grouped, tpr_grouped, color='darkblue', lw=2, label=f'ROC curve study level (area = {auc_test_grouped:.2f})')
     axROC.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
     axROC.set_xlim([0.0, 1.0])
     axROC.set_ylim([0.0, 1.05])
