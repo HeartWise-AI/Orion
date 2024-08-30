@@ -85,6 +85,9 @@ class VideoDataset(Dataset):
                 self.exams = list(df_filtered['StudyInstanceUID'][lowerBound:upperBound])
             elif "UCSF" in config.dataset_origin:
                 self.exams = list(df_filtered['UCSF_StudyID'][lowerBound:upperBound])
+            else:
+                self.exams = list(df_filtered['UCSF_StudyID'][lowerBound:df_filtered['UCSF_StudyID'].notna().sum()])
+                self.exams.extend(df_filtered['StudyInstanceUID'][df_filtered['UCSF_StudyID'].notna().sum():])
             
             # Load the number of frame to be able to run the model on the most subset of each video
             tmp_labels = []
