@@ -106,21 +106,28 @@ def stam(num_classes, resize, **kwargs):
 
 
 class RegressionHead(nn.Module):
-    def __init__(self, dim_in=192, num_classes=1):
+    def __init__(self, dim_in, num_classes=1):
         super().__init__()
-        self.fc1 = nn.Conv3d(192, 2048, bias=True, kernel_size=1, stride=1)  # 192, 2048, 72, 8, 8
+        self.fc1 = nn.Conv3d(dim_in, 2048, bias=True, kernel_size=1, stride=1)
         self.regress = nn.Linear(2048, num_classes)
 
     def forward(self, x):
-        # x shape: (batch_size, channels, time, height, width)
-        # print("After global_pool shape:", x.shape)  # Assuming dim_in=192: (batch_size, 192, time, height, width)
+        x = self.fc1(x)
+        x = x.mean([2, 3, 4])
+        x = self.regress(x)
+        return x
 
-        # After global_pool shape: torch.Size([8, 192, 72, 8, 8])
-        x = self.fc1(x)  # Shape: (batch_size, 2048, time, height, width)
-        x = x.mean([2, 3, 4])  # Shape: (batch_size, 2048)
 
-        x = self.regress(x)  # Shape: (batch_size, num_classes)
-        # print("Output shape:", x.shape)  # (batch_size, num_classes)
+class ClassificationHead(nn.Module):
+    def __init__(self, dim_in, num_classes):
+        super().__init__()
+        self.fc1 = nn.Conv3d(dim_in, 2048, bias=True, kernel_size=1, stride=1)
+        self.classify = nn.Linear(2048, num_classes)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = x.mean([2, 3, 4])
+        x = self.classify(x)
         return x
 
 
@@ -129,32 +136,50 @@ def replace_final_layer(model, config):
     Replace the final layer of the model based on the problem type.
     """
     if hasattr(model, "head"):
-        in_features = model.head.in_features
+        if isinstance(model.head, nn.Sequential):
+            in_features = model.head[0].in_channels
+        else:
+            in_features = model.head.in_features
+
         if config["task"] == "regression":
             model.head = RegressionHead(dim_in=in_features, num_classes=1)
             print(
                 f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
             )
         elif config["task"] == "classification":
-            model.head = nn.Linear(
-                in_features=in_features, out_features=config["num_classes"], bias=True
-            )
+            model.head = ClassificationHead(dim_in=in_features, num_classes=config["num_classes"])
             print(
-                f"Replaced final layer with Linear(in_features={in_features}, out_features={config['num_classes']}, bias=True) for classification"
+                f"Replaced final layer with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
             )
     elif hasattr(model, "blocks") and hasattr(model.blocks[-1], "proj"):
-        in_features = model.blocks[-1].proj.in_features
+        # Check and print in_features or shape of the first block
+        if hasattr(model.blocks[0], "proj"):
+            print(f"in_features of model.blocks[0]: {model.blocks[0].proj.in_features}")
+        else:
+            print(f"model.blocks[0] does not have 'proj' attribute")
+
+        # Print the in_features of the last block's projection layer
+        in_features_last_block = model.blocks[-1].proj.in_features
+        print(f"in_features of model.blocks[-1]: {in_features_last_block}")
+
+        # Determine the input features for the new head based on the model type
+        if "x3d" in config.get("model_name", ""):
+            in_features = 192  # This value is specific for x3d models
+        else:
+            in_features = in_features_last_block
+
+        # Replace the last block with the appropriate head based on the task
         if config["task"] == "regression":
             model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
             print(
                 f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
             )
         elif config["task"] == "classification":
-            model.blocks[-1].proj = nn.Linear(
-                in_features=in_features, out_features=config["num_classes"], bias=True
+            model.blocks[-1] = ClassificationHead(
+                dim_in=in_features, num_classes=config["num_classes"]
             )
             print(
-                f"Replaced final layer with Linear(in_features={in_features}, out_features={config['num_classes']}, bias=True) for classification"
+                f"Replaced final block with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
             )
     else:
         raise AttributeError("Unable to determine input features for the final layer")
