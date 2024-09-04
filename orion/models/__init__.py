@@ -8,6 +8,7 @@ from stam_pytorch import STAM
 from timesformer_pytorch import TimeSformer
 
 from orion.models.config import _C
+from orion.models.videopairclassifier import VideoPairClassifier
 from orion.models.vivit import ViViT
 from orion.models.x3d_multi import Bottleneck as MultiBottleneck
 from orion.models.x3d_multi import X3D_multi
@@ -275,6 +276,15 @@ def load_and_modify_model(config):
 
         model = mvit_v2_s(weights=MViT_V2_S_Weights.KINETICS400_V1)
         model = replace_final_layer(model, config)
+    elif config["model_name"] == "videopairclassifier":
+        if "feature_extractor_backbone" not in config:
+            raise ValueError(
+                "feature_extractor_backbone must be defined in the configuration for VideoPairClassifier"
+            )
+        model = VideoPairClassifier(
+            num_classes=config["num_classes"],
+            feature_extractor_backbone=config["feature_extractor_backbone"],
+        )
     else:
         raise ValueError(f"Unsupported model: {config['model_name']}")
     return model
