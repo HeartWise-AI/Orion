@@ -115,19 +115,6 @@ class RegressionHead(nn.Module):
         return x
 
 
-class ClassificationHead(nn.Module):
-    def __init__(self, dim_in, num_classes):
-        super().__init__()
-        self.fc1 = nn.Conv3d(dim_in, 2048, bias=True, kernel_size=1, stride=1)
-        self.classify = nn.Linear(2048, num_classes)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = x.mean([2, 3, 4])
-        x = self.classify(x)
-        return x
-
-
 class TransformerHead(nn.Module):
     def __init__(self, dim_in, num_classes, dropout=0.5):
         super().__init__()
@@ -163,6 +150,13 @@ def replace_final_layer(model, config):
             print(
                 f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for {config['task']}"
             )
+        elif "swin3d" in config["model_name"].lower():
+            model.head = nn.Linear(
+                in_features=in_features, out_features=config["num_classes"], bias=True
+            )
+            print(
+                f"Replaced final layer with Linear(in_features={in_features}, out_features={config['num_classes']}, bias=True) for {config['task']}"
+            )
         else:
             if config["task"] == "regression":
                 model.head = RegressionHead(dim_in=in_features, num_classes=1)
@@ -170,11 +164,9 @@ def replace_final_layer(model, config):
                     f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
                 )
             elif config["task"] == "classification":
-                model.head = ClassificationHead(
-                    dim_in=in_features, num_classes=config["num_classes"]
-                )
+                model.head = RegressionHead(dim_in=in_features, num_classes=config["num_classes"])
                 print(
-                    f"Replaced final layer with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
+                    f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
                 )
 
     elif hasattr(model, "blocks") and hasattr(model.blocks[-1], "proj"):
@@ -201,11 +193,11 @@ def replace_final_layer(model, config):
                 f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
             )
         elif config["task"] == "classification":
-            model.blocks[-1] = ClassificationHead(
+            model.blocks[-1] = RegressionHead(
                 dim_in=in_features, num_classes=config["num_classes"]
             )
             print(
-                f"Replaced final block with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
+                f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
             )
     elif hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm):
         in_features = model.head[1].in_features
@@ -216,9 +208,9 @@ def replace_final_layer(model, config):
                 f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
             )
         elif config["task"] == "classification":
-            model.head = ClassificationHead(dim_in=in_features, num_classes=config["num_classes"])
+            model.head = RegressionHead(dim_in=in_features, num_classes=config["num_classes"])
             print(
-                f"Replaced final layer with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
+                f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
             )
     else:
         raise AttributeError("Unable to determine input features for the final layer")

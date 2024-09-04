@@ -801,55 +801,6 @@ def should_update_best_performance(
         raise ValueError(f"Invalid criterion specified: {criterion}. Choose 'loss' or 'auc'.")
 
 
-class RegressionHead(nn.Module):
-    def __init__(self, dim_in=192, num_classes=1):
-        super().__init__()
-        self.fc1 = nn.Conv3d(192, 2048, bias=True, kernel_size=1, stride=1)
-        self.regress = nn.Linear(2048, num_classes)
-
-    def forward(self, x):
-        # x shape: (batch_size, channels, time, height, width)
-        # print("After global_pool shape:", x.shape)  # Assuming dim_in=192: (batch_size, 192, time, height, width)
-
-        # After global_pool shape: torch.Size([8, 192, 72, 8, 8])
-        x = self.fc1(x)  # Shape: (batch_size, 2048, time, height, width)
-        x = x.mean([2, 3, 4])  # Shape: (batch_size, 2048)
-
-        x = self.regress(x)  # Shape: (batch_size, num_classes)
-        # print("Output shape:", x.shape)  # (batch_size, num_classes)
-        return x
-
-
-def replace_final_layer(model, config):
-    """
-    Replace the final layer of the model based on the problem type.
-    """
-    # Find the number of input features for the last layer
-    if hasattr(model.blocks[-1], "proj"):
-        in_features = model.blocks[-1].proj.in_features
-    elif hasattr(model.blocks[-1], "conv"):
-        in_features = model.blocks[-1].conv.out_channels
-    else:
-        raise AttributeError("Unable to determine input features for the final layer")
-
-    if config["task"] == "regression":
-        model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
-        print(
-            f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
-        )
-    elif config["task"] == "classification":
-        model.blocks[-1].proj = nn.Linear(
-            in_features=in_features, out_features=config["num_classes"], bias=True
-        )
-        print(
-            f"Replaced final layer with Linear(in_features={in_features}, out_features={config['num_classes']}, bias=True) for classification"
-        )
-    else:
-        raise ValueError(f"Unsupported problem type: {config['task']}")
-
-    return model
-
-
 def build_model(config, device, model_path=None, for_inference=False):
     """
     Build and initialize the model based on the configuration.
@@ -888,7 +839,7 @@ def build_model(config, device, model_path=None, for_inference=False):
     model = load_and_modify_model(config)
 
     # Print the entire model architecture to verify the changes
-    print("Updated model architecture:", model)
+    # print("Updated model architecture:", model)
 
     # Add the new classification feature
     if config["task"] == "classification":
