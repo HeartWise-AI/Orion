@@ -8,10 +8,7 @@ from stam_pytorch import STAM
 from timesformer_pytorch import TimeSformer
 
 from orion.models.config import _C
-from orion.models.movinet_model import MoViNet
 from orion.models.vivit import ViViT
-from orion.models.x3d_legacy import Bottleneck as LegacyBottleneck
-from orion.models.x3d_legacy import X3D_legacy
 from orion.models.x3d_multi import Bottleneck as MultiBottleneck
 from orion.models.x3d_multi import X3D_multi
 
@@ -131,26 +128,55 @@ class ClassificationHead(nn.Module):
         return x
 
 
+class TransformerHead(nn.Module):
+    def __init__(self, dim_in, num_classes, dropout=0.5):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout, inplace=True)
+        self.fc = nn.Linear(dim_in, num_classes)
+
+    def forward(self, x):
+        # Global average pooling over the spatial and temporal dimensions
+        x = self.dropout(x)
+        x = self.fc(x)
+        return x
+
+
 def replace_final_layer(model, config):
     """
     Replace the final layer of the model based on the problem type.
     """
     if hasattr(model, "head"):
         if isinstance(model.head, nn.Sequential):
-            in_features = model.head[0].in_channels
-        else:
+            in_features = model.head[-1].in_features
+        elif isinstance(model.head, nn.Linear):
             in_features = model.head.in_features
+        else:
+            in_features = model.head.fc1.in_channels if hasattr(model.head, "fc1") else None
 
-        if config["task"] == "regression":
-            model.head = RegressionHead(dim_in=in_features, num_classes=1)
+        if in_features is None:
+            raise AttributeError("Unable to determine input features for the final layer")
+
+        num_classes = 1 if config["task"] == "regression" else config["num_classes"]
+
+        if "mvit" in config["model_name"].lower():
+            model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
             print(
-                f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+                f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for {config['task']}"
             )
-        elif config["task"] == "classification":
-            model.head = ClassificationHead(dim_in=in_features, num_classes=config["num_classes"])
-            print(
-                f"Replaced final layer with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
-            )
+        else:
+            if config["task"] == "regression":
+                model.head = RegressionHead(dim_in=in_features, num_classes=1)
+                print(
+                    f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+                )
+            elif config["task"] == "classification":
+                model.head = ClassificationHead(
+                    dim_in=in_features, num_classes=config["num_classes"]
+                )
+                print(
+                    f"Replaced final layer with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
+                )
+
     elif hasattr(model, "blocks") and hasattr(model.blocks[-1], "proj"):
         # Check and print in_features or shape of the first block
         if hasattr(model.blocks[0], "proj"):
@@ -181,6 +207,19 @@ def replace_final_layer(model, config):
             print(
                 f"Replaced final block with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
             )
+    elif hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm):
+        in_features = model.head[1].in_features
+
+        if config["task"] == "regression":
+            model.head = RegressionHead(dim_in=in_features, num_classes=1)
+            print(
+                f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+            )
+        elif config["task"] == "classification":
+            model.head = ClassificationHead(dim_in=in_features, num_classes=config["num_classes"])
+            print(
+                f"Replaced final layer with ClassificationHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
+            )
     else:
         raise AttributeError("Unable to determine input features for the final layer")
 
@@ -197,14 +236,10 @@ def load_and_modify_model(config):
 
     if config["model_name"] == "x3d_multi":
         model = x3d_multi(num_classes, **config)
-    elif config["model_name"] == "x3d_legacy":
-        model = x3d_legacy(num_classes, **config)
     elif config["model_name"] == "timesformer":
         model = timesformer(num_classes, resize, **config)
     elif config["model_name"] == "vivit":
         model = vivit(num_classes, resize, num_frames, **config)
-    elif config["model_name"] == "movinet":
-        model = movinet(num_classes, resize, **config)
     elif config["model_name"] == "stam":
         model = stam(num_classes, resize, **config)
     elif config["model_name"] in [
@@ -220,8 +255,6 @@ def load_and_modify_model(config):
         "x3d_s",
         "x3d_m",
         "x3d_l",
-        "mvit_base_16x4",
-        "mvit_base_32x3",
         "efficient_x3d_xs",
         "efficient_x3d_s",
         "swin3d_s",
@@ -239,6 +272,16 @@ def load_and_modify_model(config):
             )
 
         # Replace the final layer only for these models
+        model = replace_final_layer(model, config)
+    elif config["model_name"] == "mvit_v1_b":
+        from torchvision.models.video import mvit_v1_b
+
+        model = mvit_v1_b(weights="KINETICS400_V1")
+        model = replace_final_layer(model, config)
+    elif config["model_name"] == "mvit_v2_s":
+        from torchvision.models.video import MViT_V2_S_Weights, mvit_v2_s
+
+        model = mvit_v2_s(weights=MViT_V2_S_Weights.KINETICS400_V1)
         model = replace_final_layer(model, config)
     else:
         raise ValueError(f"Unsupported model: {config['model_name']}")

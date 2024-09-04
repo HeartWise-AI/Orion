@@ -857,12 +857,34 @@ def build_model(config, device, model_path=None, for_inference=False):
     Args:
         config (dict): Configuration parameters for the model.
         device (str): Device to do the training.
+        model_path (str, optional): Path to load the model from. Defaults to None.
+        for_inference (bool, optional): Whether the model is being built for inference. Defaults to False.
 
     Returns:
-        torch.nn.Module: Initialized model.
+        tuple: Initialized model and other related objects.
     """
-    # Instantiate model based on configuration
+    # Check frame and resize parameters
+    frames = config.get("frames", 16)  # Default to 16 if not specified
+    resize = config.get("resize", 224)  # Default to 224 if not specified
 
+    if config["model_name"].startswith("swin3d"):
+        if frames not in [24, 32]:
+            raise ValueError("swin3d supports only 24 or 32 frames.")
+    elif config["model_name"].startswith("x3d"):
+        if frames % 8 != 0:
+            raise ValueError("x3d models support frame counts that are multiples of 8.")
+        if config["model_name"] == "x3d_m" and resize not in [224, 256]:
+            raise ValueError("x3d_m supports video values of either 224x224 or 256x256.")
+    elif config["model_name"].startswith("mvit"):
+        if frames != 16:
+            raise ValueError("mvit supports only 16 frames.")
+
+    # Set default resize to 224x224 for models other than x3d_m
+    if config["model_name"] != "x3d_m" and resize != 224:
+        print(f"Warning: Resize value {resize} is not 224. Setting to default 224x224.")
+        config["resize"] = 224
+
+    # Instantiate model based on configuration
     model = load_and_modify_model(config)
 
     # Print the entire model architecture to verify the changes
