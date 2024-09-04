@@ -819,8 +819,8 @@ def build_model(config, device, model_path=None, for_inference=False):
     resize = config.get("resize", 224)  # Default to 224 if not specified
 
     if config["model_name"].startswith("swin3d"):
-        if frames not in [24, 32]:
-            raise ValueError("swin3d supports only 24 or 32 frames.")
+        if frames % 12 != 0:
+            raise ValueError("swin3d supports only frame counts that are multiples of 12.")
     elif config["model_name"].startswith("x3d"):
         if frames % 8 != 0:
             raise ValueError("x3d models support frame counts that are multiples of 8.")
