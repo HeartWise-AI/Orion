@@ -69,7 +69,7 @@ When configuring your model in the YAML file, ensure that the `frames` and `resi
 1. Run the main script with torchrun:
 
    ```bash
-   torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config notebooks/config/config.yaml
+   torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
    ```
 
    This command runs the script in a distributed manner with 2 GPU processes on a single node.
