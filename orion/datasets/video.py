@@ -450,7 +450,9 @@ class Video_Multi(torch.utils.data.Dataset):
 
         self.fnames, self.outcome = [], []
 
-        df_dataset = pd.read_csv(os.path.join(self.folder, self.filename), sep="α")
+        df_dataset = pd.read_csv(
+            os.path.join(self.folder, self.filename), sep="α", engine="python"
+        )
         view_countIndex = df_dataset.columns.get_loc(self.view_count)
         filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
         splitIndex = df_dataset.columns.get_loc("Split")

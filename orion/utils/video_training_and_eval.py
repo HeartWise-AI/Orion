@@ -817,10 +817,9 @@ def build_model(config, device, model_path=None, for_inference=False):
     # Check frame and resize parameters
     frames = config.get("frames", 16)  # Default to 16 if not specified
     resize = config.get("resize", 224)  # Default to 224 if not specified
-
     if config["model_name"].startswith("swin3d"):
-        if frames % 12 != 0:
-            raise ValueError("swin3d supports only frame counts that are multiples of 12.")
+        if frames % 2 != 0:
+            raise ValueError("swin3d supports only frame counts that are multiples of 2.")
     elif config["model_name"].startswith("x3d"):
         if frames % 8 != 0:
             raise ValueError("x3d models support frame counts that are multiples of 8.")
@@ -831,7 +830,7 @@ def build_model(config, device, model_path=None, for_inference=False):
             raise ValueError("mvit supports only 16 frames.")
 
     # Set default resize to 224x224 for models other than x3d_m
-    if config["model_name"] != "x3d_m" and resize != 224:
+    if config["model_name"] not in ["x3d_m", "videopairclassifier"] and resize != 224:
         print(f"Warning: Resize value {resize} is not 224. Setting to default 224x224.")
         config["resize"] = 224
 
@@ -884,6 +883,10 @@ def build_model(config, device, model_path=None, for_inference=False):
                 labels_map[int(int_label)] = label
 
         print("Labels map before sorting:", labels_map)
+        if len(labels_map) > 2 and config["num_classes"] != len(labels_map):
+            raise ValueError(
+                f"Error: The number of classes specified in the config ({config['num_classes']}) does not match the number of unique labels ({len(labels_map)})."
+            )
 
         # Optionally, sort the labels_map if needed
         labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
