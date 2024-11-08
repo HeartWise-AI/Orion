@@ -6,7 +6,6 @@ import sys
 
 import numpy as np
 import pandas as pd
-import pytorchvideo.transforms
 import skimage.draw
 import torch.utils.data
 from torchvision.transforms import v2
