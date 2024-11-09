@@ -1,0 +1,34 @@
+# Ignore directories
+artifacts/
+.ipynb_checkpoints/
+__pycache__/
+.empty/
+.vscode/
+orion/trained_models/
+data/
+orion/notebooks/wandb/
+final_models/
+wandb/
+DeepQCA_videos/
+CathEF-data/
+df_angle_object_rca_lca_filtered/
+wandb/
+exported_videos_512_by_512_MHI_UCSF/
+.idea/
+Denis_CathEF_PredictionInvestigation/
+models/
+
+# Ignore specific file types
+*.swp
+*.pyc
+*.cfg
+*.log
+*.mar
+*.pt
+*.csv
+
+# Ignore specific files
+test.py
+CathEF*
+swin3d_s*
+core*

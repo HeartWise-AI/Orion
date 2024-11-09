@@ -1,0 +1,58 @@
+num_epochs: 50
+model_name: swin3d_s
+model_path: null
+data_filename: /volume/Orion/data/train_val_test_LCA_REGRESSION_with_MHI_2021_data_NAS_path_mu.csv
+mean: [120.905205, 120.905205, 120.905205]
+std: [40.97189, 40.97189, 40.97189]
+root: "."
+target_label: y_true_cat
+datapoint_loc_label: FileName
+label_loc_label: y_true_cat
+binary_threshold: 40.00
+use_amp: true
+frames: 32
+device: cuda
+period: 2
+pretrained: false
+seed: 0
+optimizer: RAdam
+weight_decay: 0.0001
+num_workers: 8
+batch_size: 5
+lr: 0.0001
+label_smoothing: null
+label_smoothing_value: null
+class_weights: null
+loss: bce_logit_loss
+task: classification
+num_classes: 1
+scheduler_type: plateau
+factor: 0.5
+patience: 5
+threshold: 0.01
+lr_step_period: 15
+run_test: true
+tag: CathEF_Classification
+project: CathEF_Classification
+entity: mhi_ai
+model_path: null
+resume: false
+rand_augment: true
+resize: 224
+apply_mask: false
+view_count: null
+save_best: loss
+metrics_control:
+  optim_thresh: g_mean
+  plot_pred_distribution: true
+  plot_metrics_moving_thresh: true
+  n_bootstrap: 100
+  q_bootstrap: 0.05
+transforms:
+  - transform: RandomAffine
+    params:
+      degrees: 30
+      translate: [0.0, 0.1]
+      scale: [0.9, 1.1]
+      shear: [0, 20]
+      fill: null
