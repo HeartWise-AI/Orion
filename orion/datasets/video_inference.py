@@ -258,7 +258,7 @@ class Video_inference(torch.utils.data.Dataset):
             else:
                 start = np.array([0])
 
-        if self.split == "inference" or self.target_label is None:
+        if self.target_label is None:
             target = None
         else:
             target = self.outcome[index]
