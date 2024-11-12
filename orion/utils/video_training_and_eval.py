@@ -2,17 +2,15 @@ import os
 import pathlib
 import sys
 import time
-from itertools import cycle
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
-import torchmetrics
 import torchvision.transforms as transforms
+
+from typing import Union
 
 import wandb
 
@@ -327,7 +325,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             wandb.finish()
 
 
-def sync_tensor_across_gpus(t: torch.Tensor | None) -> torch.Tensor | None:
+def sync_tensor_across_gpus(t: Union[torch.Tensor, None]) -> Union[torch.Tensor, None]:
     """
     Synchronizes a tensor across multiple GPUs in a distributed setting.
 

@@ -1,7 +1,6 @@
 """Utility functions for videos, plotting and computing performance metrics."""
 
 import os
-import typing
 
 import cv2
 import numpy as np
@@ -10,6 +9,7 @@ import torch.nn as nn
 import tqdm
 import zarr
 
+from typing import Union
 
 class RMSELoss(torch.nn.Module):
     def __init__(self):
@@ -84,7 +84,7 @@ def loadvideo(filename: str) -> np.ndarray:
     return vid
 
 
-def savevideo(filename: str, array: np.ndarray, fps: float | int = 1):
+def savevideo(filename: str, array: np.ndarray, fps: Union[float, int] = 1):
     """
     ---------------------------------------------------------------------------------
     Purpose:
