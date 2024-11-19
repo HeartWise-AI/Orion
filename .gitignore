@@ -16,7 +16,6 @@ wandb/
 exported_videos_512_by_512_MHI_UCSF/
 .idea/
 Denis_CathEF_PredictionInvestigation/
-models/
 
 # Ignore specific file types
 *.swp
