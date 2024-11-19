@@ -259,6 +259,11 @@ class Video_inference(torch.utils.data.Dataset):
         else:
             video = np.stack(video)
 
+        if self.split == "inference" or self.target_label is None:
+            target = None
+        else:
+            target = self.outcome[index]
+
         if self.pad is not None:
             # Add padding of zeros (mean color of videos)
             # Crop of original size is taken out
@@ -272,6 +277,11 @@ class Video_inference(torch.utils.data.Dataset):
             video = temp[:, :, i : (i + h), j : (j + w)]
 
             return video, self.fnames[index]
+        
+        if target is not None:
+            return video, target, self.fnames[index]
+        else:
+            return video, self.fnames[index]        
 
     def __len__(self):
         return len(self.fnames)
