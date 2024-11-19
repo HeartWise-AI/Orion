@@ -403,7 +403,7 @@ class Video_Multi(torch.utils.data.Dataset):
         target_label="HCM",
         datapoint_loc_label="FileName",
         resize=224,
-        view_count="view_count",
+        view_count=2,
         mean=0.0,
         std=1.0,
         length=32,
@@ -453,12 +453,12 @@ class Video_Multi(torch.utils.data.Dataset):
         df_dataset = pd.read_csv(
             os.path.join(self.folder, self.filename), sep="α", engine="python"
         )
-        view_countIndex = df_dataset.columns.get_loc(self.view_count)
+
         filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
         splitIndex = df_dataset.columns.get_loc("Split")
         target_index = df_dataset.columns.get_loc(target_label)
         for _, row in df_dataset.iterrows():
-            view_count = int(row.iloc[view_countIndex])
+            view_count = int(self.view_count)
             filenameIndex = [
                 df_dataset.columns.get_loc(self.datapoint_loc_label + str(i))
                 for i in range(view_count)

@@ -110,6 +110,10 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     # Use model_path from config, or default to config["output_dir"] if model_path is None
     model_path = config.get("model_path") or config.get("output_dir")
+    if "binary_threshold" not in config:
+        config["binary_threshold"] = 0.5
+        print("Error: 'binary_threshold' not found in config. Setting it to default value 0.5.")
+
     print(model_path)
     # Extract the last element of the folder path
 
@@ -1065,7 +1069,34 @@ def get_predictions(
                 if config["model_name"] in ["timesformer", "stam"]:
                     data = data.permute(0, 1, 3, 2, 4, 5)
 
-                filenames.extend(fname)
+                if config["view_count"] is not None and config["view_count"] >= 1:
+
+                    def flatten(lst):
+                        """Recursively flattens a nested list."""
+                        if isinstance(lst, list):
+                            return [item for sublist in lst for item in flatten(sublist)]
+                        else:
+                            return [lst]
+
+                    # Flatten the nested list
+                    flat_fname = flatten(fname)
+
+                    def reshape_to_pairs(flat_list, group_size=2):
+                        """Reshapes a flat list into a list of lists, each containing group_size elements."""
+                        return [
+                            flat_list[i : i + group_size]
+                            for i in range(0, len(flat_list), group_size)
+                        ]
+
+                    # Reshape the flattened list into pairs according to the view_count
+                    grouped_filenames = reshape_to_pairs(
+                        flat_fname, group_size=config["view_count"]
+                    )
+
+                    # Append each pair to filenames as a separate row
+                    filenames.extend(grouped_filenames)
+                else:
+                    filenames.extend(fname)
                 if outcomes is not None and hasattr(outcomes, "detach"):
                     # Check if outcomes is not empty
                     if outcomes.nelement() > 0:
@@ -1587,20 +1618,22 @@ def format_dataframe_predictions(filenames, split_yhat, task, split, config, spl
 
 def save_predictions_to_csv(df_predictions, config, split, epoch):
     import datetime
+    import os
 
     current_date = datetime.datetime.now().strftime("%Y%m%d")
 
-    model_dir = os.path.basename(config.get("model_path") or config["output_dir"])
+    # Extract the directory name from model_path if it exists
+    if config.get("model_path"):
+        model_dir = os.path.basename(os.path.dirname(config["model_path"]))
+    else:
+        model_dir = os.path.basename(config["output_dir"])
 
     filename = f"{split}_predictions_epoch_{epoch}.csv"
     best_filename = f"{split}_predictions_epoch_best.csv"
 
-    if config["output_dir"] != model_dir:
-        output_path = os.path.join(config["output_dir"], model_dir, filename)
-        best_output_path = os.path.join(config["output_dir"], model_dir, best_filename)
-    else:
-        output_path = os.path.join(config["output_dir"], filename)
-        best_output_path = os.path.join(config["output_dir"], best_filename)
+    # Construct the output path
+    output_path = os.path.join(config["output_dir"], model_dir, filename)
+    best_output_path = os.path.join(config["output_dir"], model_dir, best_filename)
 
     # Ensure the directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

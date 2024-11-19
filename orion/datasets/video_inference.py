@@ -70,8 +70,8 @@ class Video_inference(torch.utils.data.Dataset):
         self,
         root="",
         data_filename=None,
+        target_label=None,
         split="train",
-        target_label="HCM",
         datapoint_loc_label="FileName2",
         resize=224,
         mean=0.0,
@@ -92,7 +92,6 @@ class Video_inference(torch.utils.data.Dataset):
         self.filename = data_filename
         self.datapoint_loc_label = datapoint_loc_label
         self.split = split
-        self.target_label = target_label
         self.mean = format_mean_std(mean)
         self.std = format_mean_std(std)
         self.length = length
@@ -122,11 +121,6 @@ class Video_inference(torch.utils.data.Dataset):
         filenameIndex = list(df_dataset.columns).index(self.datapoint_loc_label)
 
         splitIndex = list(df_dataset.columns).index("Split")
-
-        if target_label is None:
-            target_index = None
-        else:
-            target_index = df_dataset.columns.get_loc(target_label)
 
         for i, row in df_dataset.iterrows():
             try:
@@ -258,11 +252,6 @@ class Video_inference(torch.utils.data.Dataset):
             else:
                 start = np.array([0])
 
-        if self.split == "inference" or self.target_label is None:
-            target = None
-        else:
-            target = self.outcome[index]
-
         # Select random clips
         video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in start)
         if self.clips == 1:
@@ -281,9 +270,7 @@ class Video_inference(torch.utils.data.Dataset):
             ] = video  # pylint: disable=E1130
             i, j = np.random.randint(0, 2 * self.pad, 2)
             video = temp[:, :, i : (i + h), j : (j + w)]
-        if target is not None:
-            return video, target, self.fnames[index]
-        else:
+
             return video, self.fnames[index]
 
     def __len__(self):
@@ -300,16 +287,14 @@ def _defaultdict_of_lists():
 
 
 class Video_Multi_inference(torch.utils.data.Dataset):
-    """orion Dataset for multiple video inference.
-    This class is based on Video_inference but supports multiple videos per sample.
-    """
+    """orion Dataset for multiple video inference."""
 
     def __init__(
         self,
-        root="",
+        root="../../data/",
         data_filename=None,
-        split="train",
-        target_label="HCM",
+        split="inference",
+        target_label=None,
         datapoint_loc_label="FileName",
         resize=224,
         view_count=2,
@@ -323,15 +308,18 @@ class Video_Multi_inference(torch.utils.data.Dataset):
         noise=None,
         video_transforms=None,
         apply_mask=False,
+        rand_augment=False,
         num_classes=None,
         target_transform=None,
         external_test_location=None,
+        weighted_sampling=False,
+        debug=False,
+        normalize=True,
     ) -> None:
         self.folder = pathlib.Path(root)
         self.filename = data_filename
         self.datapoint_loc_label = datapoint_loc_label
         self.split = split
-        self.target_label = target_label
         self.mean = format_mean_std(mean)
         self.std = format_mean_std(std)
         self.length = length
@@ -342,77 +330,72 @@ class Video_Multi_inference(torch.utils.data.Dataset):
         self.noise = noise
         self.video_transforms = video_transforms
         self.apply_mask = apply_mask
+        self.rand_augment = rand_augment
         self.target_transform = target_transform
         self.external_test_location = external_test_location
         self.resize = resize
         self.view_count = view_count
+        self.debug = debug
+        self.weighted_sampling = weighted_sampling
+        self.normalize = normalize
 
-        self.fnames, self.outcome = [], []
+        self.fnames = []
 
         df_dataset = pd.read_csv(
             os.path.join(self.folder, self.filename), sep="α", engine="python"
         )
-        self.header = list(df_dataset.columns)
 
-        if len(self.header) == 1:
-            raise ValueError(
-                "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
-            )
-
-        splitIndex = self.header.index("Split")
-        target_index = self.header.index(target_label) if target_label is not None else None
-
+        filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
+        splitIndex = df_dataset.columns.get_loc("Split")
         for _, row in df_dataset.iterrows():
             view_count = int(self.view_count)
-            fileMode = str(row[splitIndex]).lower()
+            filenameIndex = [
+                df_dataset.columns.get_loc(self.datapoint_loc_label + str(i))
+                for i in range(view_count)
+            ]
+            fileMode = row.iloc[splitIndex].lower()
+            fileName = [row.iloc[i] for i in filenameIndex]
 
-            if split in ["all", fileMode]:
-                file_vids = []
-                for i in range(view_count):
-                    fileName = os.path.join(self.folder, row[f"{self.datapoint_loc_label}{i}"])
-                    if os.path.exists(fileName):
-                        file_vids.append(fileName)
-                    else:
-                        print(f"Warning: The file {fileName} does not exist.")
-
-                if len(file_vids) > 0:
-                    self.fnames.append(file_vids)
-                    if target_index is not None:
-                        self.outcome.append(row[target_index])
-
-        if len(self.fnames) == 0:
-            raise ValueError(f"No files found for split {split}")
+            file_vids = [
+                i for i in fileName if self.split in ["all", fileMode] and os.path.exists(i)
+            ]
+            if len(file_vids) > 1:
+                self.fnames.append(file_vids)
 
         self.frames = collections.defaultdict(list)
         self.trace = collections.defaultdict(_defaultdict_of_lists)
 
-    def process_video(self, video_fname):
-        video = orion.utils.loadvideo(video_fname).astype(np.float32)
+    def make_video(self, video, count, index):
+        video = orion.utils.loadvideo(video).astype(np.float32)
 
         if self.apply_mask:
-            # Apply mask logic here (similar to Video_inference)
+            # Apply mask logic here (similar to Video_Multi)
             pass
 
         if self.noise is not None:
-            # Apply noise logic here (similar to Video_inference)
-            pass
+            n = video.shape[1] * video.shape[2] * video.shape[3]
+            ind = np.random.choice(n, round(self.noise * n), replace=False)
+            f = ind % video.shape[1]
+            ind //= video.shape[1]
+            i = ind % video.shape[2]
+            ind //= video.shape[2]
+            j = ind
+            video[:, f, i, j] = 0
 
         video = torch.from_numpy(video)
-        if self.resize is not None:
-            video = v2.Resize((self.resize, self.resize), antialias=None)(video)
-        video = v2.Normalize(self.mean, self.std)(video)
 
-        if self.video_transforms is not None:
-            transforms = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
-            scripted_transforms = torch.jit.script(transforms)
-            video = scripted_transforms(video)
+        if self.resize is not None:
+            video = v2.Resize((self.resize, self.resize), antialias=True)(video)
+
+        if self.normalize:
+            if hasattr(self, "mean") and hasattr(self, "std"):
+                video = v2.Normalize(self.mean, self.std)(video)
 
         video = video.permute(1, 0, 2, 3)
         video = video.numpy()
 
-        # Set number of frames (similar to Video_inference)
         c, f, h, w = video.shape
-        length = self.length if self.length is not None else f // self.period
+        length = f // self.period if self.length is None else self.length
         if self.max_length is not None:
             length = min(length, self.max_length)
 
@@ -425,41 +408,31 @@ class Video_Multi_inference(torch.utils.data.Dataset):
         if self.clips == "all":
             start = np.arange(f - (length - 1) * self.period)
         else:
-            start = (
-                np.random.choice(f - (length - 1) * self.period, self.clips)
-                if self.split == "train"
-                else np.array([0])
-            )
+            start = np.random.choice(f - (length - 1) * self.period, self.clips)
 
         video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in start)
         video = video[0] if self.clips == 1 else np.stack(video)
 
         if self.pad is not None:
-            # Apply padding logic here (similar to Video_inference)
-            pass
+            c, l, h, w = video.shape
+            temp = np.zeros((c, l, h + 2 * self.pad, w + 2 * self.pad), dtype=video.dtype)
+            temp[:, :, self.pad : -self.pad, self.pad : -self.pad] = video
+            i, j = np.random.randint(0, 2 * self.pad, 2)
+            video = temp[:, :, i : (i + h), j : (j + w)]
 
         return video
 
     def __getitem__(self, index):
-        videos = []
-        for video_fname in self.fnames[index]:
-            if self.split == "external_test":
-                video_fname = os.path.join(self.external_test_location, video_fname)
-            elif self.split == "clinical_test":
-                video_fname = os.path.join(self.folder, "ProcessedStrainStudyA4c", video_fname)
+        vids_stack = []
+        filename_stack = []
+        filenames = self.fnames[index]
 
-            video = self.process_video(video_fname)
-            videos.append(video)
+        for count, i in enumerate(filenames):
+            video = self.make_video(i, count, index)
+            vids_stack.append(video)
+            filename_stack.append(i)
 
-        if self.split == "inference" or self.target_label is None:
-            target = None
-        else:
-            target = self.outcome[index]
-
-        if target is not None:
-            return videos, target, self.fnames[index]
-        else:
-            return videos, self.fnames[index]
+        return vids_stack, filename_stack
 
     def __len__(self):
         return len(self.fnames)
