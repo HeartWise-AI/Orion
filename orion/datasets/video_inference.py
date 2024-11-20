@@ -134,8 +134,10 @@ class Video_inference(torch.utils.data.Dataset):
             if split in ["all", fileMode]:
                 if os.path.exists(fileName):
                     self.fnames.append(fileName)
-                    if (target_index is not None) and (not pd.isna(row.iloc[target_index])):
-                        self.outcome.append(row.iloc[target_index])
+                    if (target_label is not None) and (not pd.isna(row.iloc[target_label])):
+                        self.outcome.append(row.iloc[target_label])
+                    else:
+                        self.outcome.append(None)
                 else:
                     raise FileNotFoundError(f"The file {fileName} does not exist.")
 
@@ -277,11 +279,11 @@ class Video_inference(torch.utils.data.Dataset):
             video = temp[:, :, i : (i + h), j : (j + w)]
 
             return video, self.fnames[index]
-        
+
         if target is not None:
             return video, target, self.fnames[index]
         else:
-            return video, self.fnames[index]        
+            return video, self.fnames[index]
 
     def __len__(self):
         return len(self.fnames)
@@ -470,8 +472,7 @@ def format_mean_std(input_value):
     Raises:
         ValueError: If the input cannot be converted to a list of floats.
     """
-
-    if input_value is 1.0 or input_value is 0.0:
+    if input_value == 1.0 or input_value == 0.0:
         print("Mean/STD value is not defined")
         return input_value
 
