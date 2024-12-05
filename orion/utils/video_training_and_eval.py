@@ -259,9 +259,16 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             print(len(class_weights))
             weights = torch.tensor(class_weights, dtype=torch.float32)
             weights = weights.to(device)
+    elif config["task"] == "contrastive":
+        weights = None
+        metrics = {
+            "train": initialize_contrastive_metrics(device),
+            "val": initialize_contrastive_metrics(device),
+            "test": initialize_contrastive_metrics(device),
+        }
     else:
         raise ValueError(
-            f"Invalid task specified: {task}. Choose 'regression' or 'classification'."
+            f"Invalid task specified: {task}. Choose 'regression', 'classification', or 'contrastive'."
         )
 
     best_metrics = {
@@ -625,6 +632,12 @@ def run_training_or_evaluate_orchestrator(
             # Update the best metrics for multi-class classification, handle logic for your use case
             mean_roc_auc_no_nan = metrics_summary["auc_weighted"]
             print(f"Mean ROC AUC score after removing NaNs: {mean_roc_auc_no_nan}")
+
+    elif task == "contrastive":
+        final_metrics = metrics[phase].compute()
+        metrics[phase].reset()
+        if do_log:
+            log_contrastive_metrics_to_wandb(phase, final_metrics, loss, learning_rate)
 
     # Update and save checkpoints
     if do_log:
@@ -1307,6 +1320,9 @@ def compute_loss_and_update_metrics(
         update_classification_metrics(
             metrics[phase], probabilities, outcomes, config["num_classes"]
         )
+    elif task == "contrastive":
+        loss = compute_contrastive_loss(outputs, outcomes, config).cuda(device)
+        metrics[phase].update(outputs, outcomes)
     return loss
 
 
@@ -1347,6 +1363,8 @@ def get_predictions_during_training(outputs, task, config):
             return torch.sigmoid(outputs).detach().cpu().numpy()
         else:
             return torch.softmax(outputs, dim=1).detach().cpu().numpy()
+    elif task == "contrastive":
+        return outputs.detach().cpu().numpy()
 
 
 def backpropagate(optimizer, scaler, loss):
@@ -1413,6 +1431,31 @@ def compute_classification_loss(outputs, targets, model_loss, weights, config):
     # print(f"Targets shape after processing: {targets.shape}")  # Debug print
 
     return criterion(outputs, targets)
+
+
+def compute_contrastive_loss(outputs, outcomes, config):
+    """
+    Computes the contrastive loss based on the specified model loss.
+
+    Args:
+        outputs (Tensor): The predicted outputs from the model.
+        outcomes (Tensor): The target values.
+        config (dict): Configuration parameters.
+
+    Returns:
+        Tensor: The computed contrastive loss.
+    """
+    margin = config.get("contrastive_margin", 1.0)
+    same_study_mask = outcomes[:, None] == outcomes[None, :]
+    different_study_mask = ~same_study_mask
+
+    positive_distances = torch.norm(outputs[:, None] - outputs[None, :], dim=-1) * same_study_mask
+    negative_distances = torch.norm(outputs[:, None] - outputs[None, :], dim=-1) * different_study_mask
+
+    positive_loss = torch.mean(positive_distances)
+    negative_loss = torch.mean(torch.clamp(margin - negative_distances, min=0.0))
+
+    return positive_loss + negative_loss
 
 
 def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None):

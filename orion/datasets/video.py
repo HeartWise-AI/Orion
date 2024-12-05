@@ -75,6 +75,8 @@ class Video(torch.utils.data.Dataset):
         weighted_sampling=False,
         normalize=True,
         debug=False,
+        studyID_label=None,  # Added for contrastive learning
+        task="classification",  # Added for contrastive learning
     ) -> None:
         # Initialize instance variables
         self.folder = pathlib.Path(root)
@@ -101,6 +103,8 @@ class Video(torch.utils.data.Dataset):
         self.weighted_sampling = weighted_sampling
         self.debug = debug
         self.normalize = normalize
+        self.studyID_label = studyID_label  # Added for contrastive learning
+        self.task = task  # Added for contrastive learning
 
         self.fnames, self.outcome = [], []
         if split == "external_test":
@@ -296,16 +300,6 @@ class Video(torch.utils.data.Dataset):
                     mask[r, c] = 1
                     target.append(mask)
                 else:
-                    # change this
-                    #     target.append(np.float32(0))
-                    # else:
-                    #     target.append(np.float32(self.outcome[index][self.header.index(t)]))
-                    # change this
-                    # print(self.outcome)
-                    # print(self.outcome[index])
-                    # print(t)
-                    # print(self.header)
-                    # print(self.header.index(t))
                     target.append(self.outcome[index])
 
                 target = [np.float32(i) for i in target]
@@ -331,6 +325,10 @@ class Video(torch.utils.data.Dataset):
 
         if self.split == "inference":
             return video, self.fnames[index]
+
+        if self.task == "contrastive":
+            studyID = self.outcome[index][self.header.index(self.studyID_label)]
+            return video, target, video_fname, studyID
 
         return video, target, video_fname
 
