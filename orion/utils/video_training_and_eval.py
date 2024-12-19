@@ -36,6 +36,7 @@ from orion.models import (
 )
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
+from orion.utils.losses import LossRegistry
 from orion.utils.plot import (
     bootstrap_metrics,
     bootstrap_multicalss_metrics,
@@ -1297,12 +1298,16 @@ def compute_loss_and_update_metrics(
 ):
     if task == "regression":
         outputs = adjust_output_dimensions(outputs)
-        loss = compute_regression_loss(outputs, outcomes, model_loss).cuda(device)
+        loss = LossRegistry.create(model_loss).cuda(device)(outputs, outcomes)
         metrics[phase].update(outputs, outcomes)
     elif task == "classification":
-        loss = compute_classification_loss(outputs, outcomes, model_loss, weights, config).cuda(
-            device
-        )
+        if model_loss == "bce_logit_loss":
+            loss = LossRegistry.create("bce_logit", weight=weights).cuda(device)(outputs, outcomes)
+        elif model_loss == "ce_loss":
+            loss = LossRegistry.create("ce", weight=weights).cuda(device)(outputs, outcomes)
+        else:
+            raise ValueError(f"Unsupported loss type: {model_loss}")
+        
         probabilities = get_probabilities(outputs, config)
         update_classification_metrics(
             metrics[phase], probabilities, outcomes, config["num_classes"]
@@ -1354,65 +1359,6 @@ def backpropagate(optimizer, scaler, loss):
     scaler.scale(loss).backward()
     scaler.step(optimizer)
     scaler.update()
-
-
-# Define additional helper functions for computing loss
-def compute_regression_loss(outputs, targets, model_loss):
-    """
-    Computes the regression loss based on the specified model loss.
-
-    Args:
-        outputs (Tensor): The predicted outputs from the model.
-        targets (Tensor): The target values.
-        model_loss (str): The type of model loss to use. Supported options are "mse", "huber", "l1_loss", and "rmse" for regression and "bce_loss" or "ce_loss" for classificaiton.
-
-    Returns:
-        Tensor: The computed regression loss.
-
-    Raises:
-        NotImplementedError: If the specified model loss is not implemented.
-
-    Examples:
-        >>> outputs = torch.tensor([0.5, 0.8, 1.2])
-        >>> targets = torch.tensor([1.0, 1.5, 2.0])
-        >>> model_loss = "mse"
-        >>> compute_regression_loss(outputs, targets, model_loss)
-        tensor(0.1667)
-    """
-
-    if model_loss == "mse":
-        return torch.nn.functional.mse_loss(outputs.view(-1), targets)
-    elif model_loss == "huber":
-        return torch.nn.functional.huber_loss(outputs.view(-1), targets, delta=0.10)
-    elif model_loss == "l1_loss":
-        return torch.nn.functional.l1_loss(outputs.view(-1), targets)
-    elif model_loss == "rmse":
-        return torch.sqrt(torch.nn.functional.mse_loss(outputs.view(-1), targets))
-    else:
-        raise NotImplementedError(f"Loss type '{model_loss}' not implemented.")
-
-
-def compute_classification_loss(outputs, targets, model_loss, weights, config):
-    # print(f"Outputs shape before processing: {outputs.shape}")  # Debug print
-    # print(f"Targets shape before processing: {targets.shape}")  # Debug print
-
-    if model_loss == "bce_logit_loss":
-        criterion = torch.nn.BCEWithLogitsLoss(weight=weights)
-        if outputs.dim() > 1 and outputs.size(1) == 2:
-            outputs = outputs[:, 1]  # Select the second item for binary classification
-        elif outputs.dim() > 1 and outputs.size(1) == 1:
-            outputs = outputs.squeeze()  # Squeeze the dimension
-    elif model_loss == "ce_loss":
-        criterion = torch.nn.CrossEntropyLoss(weight=weights)
-        outputs = outputs.squeeze()
-        targets = targets.squeeze().long()
-    else:
-        raise NotImplementedError(f"Loss type '{model_loss}' not implemented.")
-
-    # print(f"Outputs shape after processing: {outputs.shape}")  # Debug print
-    # print(f"Targets shape after processing: {targets.shape}")  # Debug print
-
-    return criterion(outputs, targets)
 
 
 def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None):
