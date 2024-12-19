@@ -130,6 +130,42 @@ class TransformerHead(nn.Module):
         x = self.fc(x)
         return x
 
+class MultiOutputHead(nn.Module):
+    def __init__(self, dim_in, head_structure: dict[str, int]):
+        """
+        Initialize a multi-output head with different number of classes per head.
+        
+        Args:
+            dim_in (int): Input dimension
+            head_structure (dict[str, int]): Dictionary mapping head names to their number of output classes
+                e.g. {"contrast_agent": 1, "main_structure": 5, "stent_presence": 1}
+        """
+        super().__init__()
+        self.dropout = nn.Dropout(p=0.5)
+        # Create a separate linear layer for each head
+        for head_name, num_classes in head_structure.items():
+            setattr(self, f"{head_name}_head", nn.Linear(dim_in, num_classes))
+        # Store number of classes per head for activation selection
+        self.head_structure = head_structure
+
+    def forward(self, x):
+        """
+        Forward pass through all heads.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, dim_in]
+            
+        Returns:
+            dict[str, torch.Tensor]: Dictionary mapping head names to their outputs
+                Binary classification heads (num_classes=1) use sigmoid activation
+                Multi-class heads (num_classes>1) use softmax activation
+        """
+        x = self.dropout(x)
+        outputs = {}
+        for head_name in [name.replace('_head', '') for name in self._modules if name != 'dropout']:
+            head_output = getattr(self, f"{head_name}_head")(x)
+            outputs[head_name] = head_output
+        return outputs
 
 def replace_final_layer(model, config):
     """
@@ -146,9 +182,13 @@ def replace_final_layer(model, config):
         if in_features is None:
             raise AttributeError("Unable to determine input features for the final layer")
 
-        num_classes = 1 if config["task"] == "regression" else config["num_classes"]
-
-        if "mvit" in config["model_name"].lower():
+        if config["task"] == "multi_head":
+            if "head_structure" not in config:
+                raise ValueError("head_structure must be defined in config for multi_head task")
+            model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
+            print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
+        elif "mvit" in config["model_name"].lower():
+            num_classes = 1 if config["task"] == "regression" else config["num_classes"]
             model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
             print(
                 f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for {config['task']}"
@@ -190,7 +230,12 @@ def replace_final_layer(model, config):
             in_features = in_features_last_block
 
         # Replace the last block with the appropriate head based on the task
-        if config["task"] == "regression":
+        if config["task"] == "multi_head":
+            if "head_structure" not in config:
+                raise ValueError("head_structure must be defined in config for multi_head task")
+            model.blocks[-1] = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
+            print(f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
+        elif config["task"] == "regression":
             model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
             print(
                 f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
@@ -205,7 +250,12 @@ def replace_final_layer(model, config):
     elif hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm):
         in_features = model.head[1].in_features
 
-        if config["task"] == "regression":
+        if config["task"] == "multi_head":
+            if "head_structure" not in config:
+                raise ValueError("head_structure must be defined in config for multi_head task")
+            model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
+            print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
+        elif config["task"] == "regression":
             model.head = RegressionHead(dim_in=in_features, num_classes=1)
             print(
                 f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
