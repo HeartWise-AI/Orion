@@ -41,7 +41,6 @@ class MSELoss(Loss):
     def __call__(self, outputs, targets):
         return F.mse_loss(outputs.view(-1), targets)
 
-
 @LossRegistry.register("huber")
 class HuberLoss(Loss):
     def __init__(self, delta: float = 0.1):
@@ -50,22 +49,21 @@ class HuberLoss(Loss):
     def __call__(self, outputs, targets):
         return F.huber_loss(outputs.view(-1), targets, delta=self.delta)
 
-
 @LossRegistry.register("l1")
 class L1Loss(Loss):
     def __call__(self, outputs, targets):
         return F.l1_loss(outputs.view(-1), targets)
-
 
 @LossRegistry.register("rmse")
 class RMSELoss(Loss):
     def __call__(self, outputs, targets):
         return torch.sqrt(F.mse_loss(outputs.view(-1), targets))
 
-
 @LossRegistry.register("bce_logit")
 class BCEWithLogitsLoss(Loss):
     def __init__(self, weight=None):
+        if weight is not None and isinstance(weight, torch.Tensor):
+            weight = weight.to(weight.device)
         self.criterion = nn.BCEWithLogitsLoss(weight=weight)
 
     def __call__(self, outputs, targets):
@@ -74,7 +72,6 @@ class BCEWithLogitsLoss(Loss):
         elif outputs.dim() > 1 and outputs.size(1) == 1:
             outputs = outputs.squeeze()  # Squeeze the dimension
         return self.criterion(outputs, targets)
-
 
 @LossRegistry.register("ce")
 class CrossEntropyLoss(Loss):
@@ -86,38 +83,26 @@ class CrossEntropyLoss(Loss):
         targets = targets.squeeze().long()
         return self.criterion(outputs, targets)
 
-
-class MultiHeadLoss(nn.Module):
-    def __init__(
-        self, 
-        head_structure: Dict[str, int], 
-        loss_type: str = "standard",  # "standard" or "focal"
-        alpha: float = 0.25, 
-        gamma: float = 2.0,
-        head_weights: Dict[str, float] = None
-    ):
-        """
-        Initialize Multi-Head Loss with support for both standard and focal loss.
-        
-        Args:
-            head_structure (dict): Dictionary mapping head names to number of classes
-            loss_type (str): Type of loss to use - "standard" (BCE/CE) or "focal"
-            alpha (float): Weighting factor for focal loss
-            gamma (float): Focusing parameter for focal loss
-            head_weights (dict): Optional weights for each head in the final loss computation
-        """
-        super().__init__()
-        self.head_structure = head_structure
-        self.loss_type = loss_type
-        self.alpha = alpha
+@LossRegistry.register("multiclass_focal")
+class MultiClassFocalLoss(Loss):
+    def __init__(self, gamma: float = 2.0):
         self.gamma = gamma
-        self.head_weights = head_weights or {head: 1.0 for head in head_structure.keys()}
-        
-        # Initialize standard loss functions
-        self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
         self.ce_loss = nn.CrossEntropyLoss(reduction='none')
         
-    def binary_focal_loss(self, pred, target):
+    def __call__(self, pred, target):
+        """Compute Multi-class Focal Loss"""
+        ce_loss = self.ce_loss(pred, target)
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        return focal_loss.mean()
+    
+@LossRegistry.register("binary_focal")
+class BinaryFocalLoss(Loss):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+        self.alpha = alpha
+        self.gamma = gamma
+    
+    def __call__(self, pred, target):
         """Compute Binary Focal Loss"""
         pred = pred.squeeze()
         target = target.float()
@@ -130,40 +115,60 @@ class MultiHeadLoss(nn.Module):
         if self.alpha is not None:
             alpha_weight = torch.where(target == 1, self.alpha, 1 - self.alpha)
             focal_weight = focal_weight * alpha_weight
-            
+        
         return (focal_weight * bce_loss).mean()
     
-    def multi_class_focal_loss(self, pred, target):
-        """Compute Multi-class Focal Loss"""
-        ce_loss = self.ce_loss(pred, target)
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-        return focal_loss.mean()
     
-    def binary_standard_loss(self, pred, target):
-        """Compute standard binary cross entropy loss"""
-        pred = pred.squeeze()
-        target = target.float()
-        return self.bce_loss(pred, target).mean()
-    
-    def multi_class_standard_loss(self, pred, target):
-        """Compute standard cross entropy loss"""
-        return self.ce_loss(pred, target).mean()
-    
-    def compute_head_loss(self, pred, target, num_classes):
+@LossRegistry.register("multi_head")
+class MultiHeadLoss(nn.Module):
+    def __init__(
+        self, 
+        head_structure: Dict[str, int], 
+        loss_structure: Dict[str, str] = None,
+        alpha: float = 0.25, 
+        gamma: float = 2.0,
+        head_weights: Dict[str, float] = None,
+        loss_weights: Dict[str, torch.Tensor] = None
+    ):
         """
-        Compute loss for a single head based on number of classes and loss type.
+        Initialize Multi-Head Loss with support for both standard and focal loss.
+        
+        Args:
+            head_structure (dict): Dictionary mapping head names to number of classes
+            loss_structure (dict): Dictionary mapping head names to loss function names
+            alpha (float): Weighting factor for focal loss (used only for focal losses)
+            gamma (float): Focusing parameter for focal loss (used only for focal losses)
+            head_weights (dict): Optional weights for each head in the final loss computation
+            loss_weights (dict): Optional dictionary mapping head names to loss weights tensor
         """
-        if num_classes == 1:  # Binary classification
-            if self.loss_type == "focal":
-                return self.binary_focal_loss(pred, target)
-            else:
-                return self.binary_standard_loss(pred, target)
-        else:  # Multi-class classification
-            if self.loss_type == "focal":
-                return self.multi_class_focal_loss(pred, target)
-            else:
-                return self.multi_class_standard_loss(pred, target)
+        super().__init__()
+        self.head_structure = head_structure
+        self.head_weights = head_weights or {head: 1.0 for head in head_structure.keys()}
+        self.loss_weights = loss_weights or {}
+        
+        # Initialize loss functions for each head
+        if loss_structure is None:
+            # Default to BCE for binary and CE for multi-class
+            self.loss_fns = {}
+            for head, num_classes in head_structure.items():
+                weight = self.loss_weights.get(head, None)
+                if num_classes == 1:
+                    self.loss_fns[head] = LossRegistry.create("bce_logit", weight=weight)
+                else:
+                    self.loss_fns[head] = LossRegistry.create("ce", weight=weight)
+        else:
+            # Create loss functions based on specified structure
+            self.loss_fns = {}
+            for head, loss_name in loss_structure.items():
+                weight = self.loss_weights.get(head, None)
+                if loss_name == "binary_focal":
+                    self.loss_fns[head] = LossRegistry.create(loss_name, alpha=alpha, gamma=gamma)
+                elif loss_name == "multiclass_focal":
+                    self.loss_fns[head] = LossRegistry.create(loss_name, gamma=gamma)
+                elif loss_name in ["bce_logit", "ce"]:
+                    self.loss_fns[head] = LossRegistry.create(loss_name, weight=weight)
+                else:
+                    self.loss_fns[head] = LossRegistry.create(loss_name)
     
     def forward(
         self, 
@@ -184,12 +189,9 @@ class MultiHeadLoss(nn.Module):
         losses = {}
         total_loss = 0.0
         
-        for head_name, num_classes in self.head_structure.items():
-            head_loss = self.compute_head_loss(
-                outputs[head_name], 
-                targets[head_name],
-                num_classes
-            )
+        for head_name in self.head_structure.keys():
+            # Compute loss using the appropriate loss function
+            head_loss = self.loss_fns[head_name](outputs[head_name], targets[head_name])
             
             # Apply head-specific weight
             head_weight = self.head_weights[head_name]
