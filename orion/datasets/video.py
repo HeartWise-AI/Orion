@@ -81,9 +81,18 @@ class Video(torch.utils.data.Dataset):
         self.filename = data_filename
         self.datapoint_loc_label = datapoint_loc_label
         self.split = split
-        if not isinstance(target_label, list):
-            target_label = [target_label]
-        self.target_label = target_label
+        
+        # Handle target labels for multi-head case
+        if isinstance(target_label, str):
+            self.target_label = [target_label]
+        elif isinstance(target_label, dict):
+            # If target_label is a dictionary (head_structure), extract the keys
+            self.target_label = list(target_label.keys())
+        elif isinstance(target_label, list):
+            self.target_label = target_label
+        else:
+            self.target_label = None
+            
         self.mean = format_mean_std(mean)
         self.std = format_mean_std(std)
         self.length = length
@@ -113,18 +122,18 @@ class Video(torch.utils.data.Dataset):
                         "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
                     )
 
-            self.fnames, self.outcomes, target_index = self.load_data(split, target_label)
+            self.fnames, self.outcomes, self.target_indices = self.load_data(split, self.target_label)
             self.frames = collections.defaultdict(list)
-            # pdb.set_trace()
             self.trace = collections.defaultdict(_defaultdict_of_lists)
 
         if self.weighted_sampling is True:
-            # define weights for weighted sampling
-            labels = np.array(
-                [self.outcome[ind][target_index] for ind in range(len(self.outcome))], dtype=int
-            )
+            # For multi-head, we'll use the first target for weighted sampling
+            if isinstance(self.outcome[0], dict):
+                first_target = list(self.outcome[0].keys())[0]
+                labels = np.array([outcome[first_target] for outcome in self.outcome], dtype=int)
+            else:
+                labels = np.array([outcome for outcome in self.outcome], dtype=int)
 
-            # binary weights length == 2
             weights = 1 - (np.bincount(labels) / len(labels))
             self.weight_list = np.zeros(len(labels))
 
@@ -132,17 +141,35 @@ class Video(torch.utils.data.Dataset):
                 weight = weights[label]
                 self.weight_list[np.where(labels == label)] = weight
 
-    def load_data(self, split, target_label):
+    def load_data(self, split, target_labels):
+        """
+        Load data from the CSV file and extract filenames and outcomes.
+        
+        Args:
+            split (str): Dataset split ('train', 'val', 'test', 'all')
+            target_labels (list): List of target label column names
+            
+        Returns:
+            tuple: (filenames, outcomes, target_indices)
+        """
         # Read the "α" separated file using pandas
         file_path = os.path.join(self.folder, self.filename)
         data = pd.read_csv(file_path, sep="α", engine="python")
 
         filename_index = data.columns.get_loc(self.datapoint_loc_label)
         split_index = data.columns.get_loc("Split")
-        if target_label is None:
-            target_index = None
+        
+        # Handle target indices for multi-head case
+        if target_labels is None:
+            target_indices = None
         else:
-            target_index = data.columns.get_loc(target_label[0])
+            target_indices = {}
+            for label in target_labels:
+                try:
+                    target_indices[label] = data.columns.get_loc(label)
+                except KeyError:
+                    print(f"Warning: Target label '{label}' not found in data columns")
+                    continue
 
         self.fnames = []
         self.outcome = []
@@ -154,9 +181,14 @@ class Video(torch.utils.data.Dataset):
 
             if split in ["all", file_mode] and os.path.exists(file_name):
                 self.fnames.append(file_name)
-                self.outcome.append(row.iloc[target_index])
+                if target_indices is not None:
+                    # For multi-head, create a dictionary of outcomes
+                    outcomes = {}
+                    for label, idx in target_indices.items():
+                        outcomes[label] = row.iloc[idx]
+                    self.outcome.append(outcomes)
 
-        return self.fnames, self.outcome, target_index
+        return self.fnames, self.outcome, target_indices
 
     def __getitem__(self, index):
         # Find filename of video
@@ -233,7 +265,6 @@ class Video(torch.utils.data.Dataset):
             video = raug_composed(video)
 
         # Permute the tensor to have the shape [F, H, W, C]
-
         video = video.permute(1, 0, 2, 3)
         video = video.numpy()
 
@@ -261,58 +292,55 @@ class Video(torch.utils.data.Dataset):
             start = np.random.choice(f - (length - 1) * self.period, self.clips)
 
         if self.target_label is not None:
-            # Gather targets
-            target = []
-            for t in self.target_label:
-                key = os.path.splitext(self.fnames[index])[0]
-                if t == "Filename":
-                    target.append(self.fnames[index])
-                elif t == "LargeIndex":
-                    # Traces are sorted by cross-sectional area
-                    # Largest (diastolic) frame is last
-                    target.append(np.int(self.frames[key][-1]))
-                elif t == "SmallIndex":
-                    # Largest (diastolic) frame is first
-                    target.append(np.int(self.frames[key][0]))
-                elif t == "LargeFrame":
-                    target.append(video[:, self.frames[key][-1], :, :])
-                elif t == "SmallFrame":
-                    target.append(video[:, self.frames[key][0], :, :])
-                elif t in ["LargeTrace", "SmallTrace"]:
-                    if t == "LargeTrace":
-                        t = self.trace[key][self.frames[key][-1]]
-                    else:
-                        t = self.trace[key][self.frames[key][0]]
-                    x1, y1, x2, y2 = t[:, 0], t[:, 1], t[:, 2], t[:, 3]
-                    x = np.concatenate((x1[1:], np.flip(x2[1:])))
-                    y = np.concatenate((y1[1:], np.flip(y2[1:])))
+            # Handle multi-head case
+            if isinstance(self.outcome[index], dict):
+                # For multi-head, return the dictionary of targets
+                target = self.outcome[index]
+                if self.target_transform is not None:
+                    target = {k: self.target_transform(torch.tensor(v).float()) for k, v in target.items()}
+            else:
+                # Original single-head logic with all special cases
+                target = []
+                for t in self.target_label:
+                    key = os.path.splitext(self.fnames[index])[0]
+                    if t == "Filename":
+                        target.append(self.fnames[index])
+                    elif t == "LargeIndex":
+                        # Traces are sorted by cross-sectional area
+                        # Largest (diastolic) frame is last
+                        target.append(np.int(self.frames[key][-1]))
+                    elif t == "SmallIndex":
+                        # Largest (diastolic) frame is first
+                        target.append(np.int(self.frames[key][0]))
+                    elif t == "LargeFrame":
+                        target.append(video[:, self.frames[key][-1], :, :])
+                    elif t == "SmallFrame":
+                        target.append(video[:, self.frames[key][0], :, :])
+                    elif t in ["LargeTrace", "SmallTrace"]:
+                        if t == "LargeTrace":
+                            t = self.trace[key][self.frames[key][-1]]
+                        else:
+                            t = self.trace[key][self.frames[key][0]]
+                        x1, y1, x2, y2 = t[:, 0], t[:, 1], t[:, 2], t[:, 3]
+                        x = np.concatenate((x1[1:], np.flip(x2[1:])))
+                        y = np.concatenate((y1[1:], np.flip(y2[1:])))
 
-                    r, c = skimage.draw.polygon(
-                        np.rint(y).astype(np.int),
-                        np.rint(x).astype(np.int),
-                        (video.shape[2], video.shape[3]),
-                    )
-                    mask = np.zeros((video.shape[2], video.shape[3]), np.float32)
-                    mask[r, c] = 1
-                    target.append(mask)
-                else:
-                    # change this
-                    #     target.append(np.float32(0))
-                    # else:
-                    #     target.append(np.float32(self.outcome[index][self.header.index(t)]))
-                    # change this
-                    # print(self.outcome)
-                    # print(self.outcome[index])
-                    # print(t)
-                    # print(self.header)
-                    # print(self.header.index(t))
-                    target.append(self.outcome[index])
+                        r, c = skimage.draw.polygon(
+                            np.rint(y).astype(np.int),
+                            np.rint(x).astype(np.int),
+                            (video.shape[2], video.shape[3]),
+                        )
+                        mask = np.zeros((video.shape[2], video.shape[3]), np.float32)
+                        mask[r, c] = 1
+                        target.append(mask)
+                    else:
+                        target.append(self.outcome[index])
 
                 target = [np.float32(i) for i in target]
-        if target is not None and target != []:
-            target = tuple(target) if len(target) > 1 else target[0]
-            if self.target_transform is not None:
-                target = self.target_transform(target.cuda())
+                if target != []:
+                    target = tuple(target) if len(target) > 1 else target[0]
+                    if self.target_transform is not None:
+                        target = self.target_transform(target)
 
         # Select random clips
         video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in start)
