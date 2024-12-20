@@ -16,10 +16,10 @@ import torchvision.transforms as transforms
 
 import wandb
 
-dir2 = os.path.abspath("/volume/Orion/orion")
-dir1 = os.path.dirname(dir2)
-if not dir1 in sys.path:
-    sys.path.append(dir1)
+# Add the parent directory of 'orion' to the Python path
+dir2 = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+if dir2 not in sys.path:
+    sys.path.append(dir2)
 
 import tqdm
 
@@ -36,7 +36,6 @@ from orion.models import (
 )
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
-from orion.utils.losses import LossRegistry
 from orion.utils.plot import (
     bootstrap_metrics,
     bootstrap_multicalss_metrics,
@@ -57,6 +56,7 @@ from orion.utils.plot import (
     update_best_regression_metrics,
     update_classification_metrics,
 )
+from orion.utils.losses import LossRegistry
 
 try:
     from collections import OrderedDict
@@ -228,38 +228,49 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             "test": initialize_regression_metrics(device),
         }
     elif config["task"] == "classification":
-        num_classes = config["num_classes"]
-        if num_classes == 2 and config["loss"] == "bce_logit_loss":
-            raise ValueError(
-                "Binary classification with BCEWithLogitsLoss is not supported with num_classes set to 2. Consider using a different loss function or adjusting num_classes to 1."
-            )
-
-        metrics = {
-            "train": initialize_classification_metrics(num_classes, device),
-            "val": initialize_classification_metrics(num_classes, device),
-            "test": initialize_classification_metrics(num_classes, device),
-        }
-        class_weights = config.get("class_weights", None)
-
-        if class_weights:
-            if len(class_weights) != num_classes:
+        if config["loss"] == "multi_head":
+            head_structure = config.get("head_structure")
+            if head_structure is None:
+                raise ValueError("head_structure must be specified in config for multi-head loss")
+            
+            # Initialize metrics for each head
+            metrics = {phase: {} for phase in ["train", "val", "test"]}
+            for phase in metrics:
+                for head_name, num_classes in head_structure.items():
+                    metrics[phase][head_name] = initialize_classification_metrics(num_classes, device)
+        else:
+            num_classes = config["num_classes"]
+            if num_classes == 2 and config["loss"] == "bce_logit_loss":
                 raise ValueError(
-                    f"Length of class_weights ({len(class_weights)}) does not match num_classes ({num_classes})."
+                    "Binary classification with BCEWithLogitsLoss is not supported with num_classes set to 2. Consider using a different loss function or adjusting num_classes to 1."
                 )
 
-        if config["class_weights"] is None:
-            print("Not using weighted sampling and not using class weights specified in config")
-            weights = None
-        elif config["class_weights"] == "balanced_weights":
-            labels = train_dataset.outcome
-            weights = torch.tensor(1 - (np.bincount(labels) / len(labels)), dtype=torch.float32)
-            print("Weights", weights)
-            weights = weights.to(device)
-        else:
-            print("Using class weights specified in config", class_weights)
-            print(len(class_weights))
-            weights = torch.tensor(class_weights, dtype=torch.float32)
-            weights = weights.to(device)
+            metrics = {
+                "train": initialize_classification_metrics(num_classes, device),
+                "val": initialize_classification_metrics(num_classes, device),
+                "test": initialize_classification_metrics(num_classes, device),
+            }
+            class_weights = config.get("class_weights", None)
+
+            if class_weights:
+                if len(class_weights) != num_classes:
+                    raise ValueError(
+                        f"Length of class_weights ({len(class_weights)}) does not match num_classes ({num_classes})."
+                    )
+
+            if config["class_weights"] is None:
+                print("Not using weighted sampling and not using class weights specified in config")
+                weights = None
+            elif config["class_weights"] == "balanced_weights":
+                labels = train_dataset.outcome
+                weights = torch.tensor(1 - (np.bincount(labels) / len(labels)), dtype=torch.float32)
+                print("Weights", weights)
+                weights = weights.to(device)
+            else:
+                print("Using class weights specified in config", class_weights)
+                print(len(class_weights))
+                weights = torch.tensor(class_weights, dtype=torch.float32)
+                weights = weights.to(device)
     else:
         raise ValueError(
             f"Invalid task specified: {task}. Choose 'regression' or 'classification'."
@@ -544,6 +555,7 @@ def run_training_or_evaluate_orchestrator(
         >>> best_metric = run_training_or_evaluate_orchestrator(model, dataloader, datasets, phase, optimizer, scheduler, config, device, task, weights, metrics, best_metrics, epoch, run, labels_map, scaler)
     """
     do_log = run is not None  # Run is none if process rank is not 0
+
     model.train() if phase == "train" else model.eval()
     loss, predictions, targets, filenames = train_or_evaluate_epoch(
         model,
@@ -589,7 +601,6 @@ def run_training_or_evaluate_orchestrator(
 
         if do_log:
             log_regression_metrics_to_wandb(phase, final_metrics, loss, learning_rate)
-
             plot_regression_graphics_and_log_binarized_to_wandb(
                 y, yhat, phase, epoch, config["binary_threshold"], config
             )
@@ -599,7 +610,56 @@ def run_training_or_evaluate_orchestrator(
             )
 
     elif task == "classification":
-        if config["num_classes"] <= 2 and config["loss"] == "bce_logit_loss":
+        if config["loss"] == "multi_head":
+            # Handle multi-head metrics
+            head_structure = config.get("head_structure")
+            final_metrics = {}
+            mean_roc_auc_no_nan = 0
+            total_heads = len(head_structure)
+            
+            for head_name in head_structure.keys():
+                if head_structure[head_name] <= 2:
+                    # Binary classification for this head
+                    head_metrics = compute_classification_metrics(metrics[phase][head_name])
+                    optimal_thresh = compute_optimal_threshold(y[head_name], yhat[head_name])
+                    pred_labels = (yhat[head_name] > optimal_thresh).astype(int)
+                    
+                    if do_log:
+                        log_binary_classification_metrics_to_wandb(
+                            f"{phase}_{head_name}",
+                            epoch,
+                            loss,
+                            head_metrics["auc"],
+                            optimal_thresh,
+                            y[head_name],
+                            pred_labels,
+                            labels_map.get(head_name) if labels_map else None,
+                            learning_rate,
+                            do_log=True,
+                        )
+                    mean_roc_auc_no_nan += head_metrics["auc"]
+                else:
+                    # Multi-class classification for this head
+                    head_metrics = compute_multiclass_metrics(metrics[phase][head_name])
+                    if do_log:
+                        log_multiclass_metrics_to_wandb(
+                            f"{phase}_{head_name}",
+                            epoch,
+                            head_metrics,
+                            labels_map.get(head_name) if labels_map else None,
+                            y[head_name],
+                            yhat[head_name],
+                            learning_rate,
+                            do_log=True,
+                        )
+                    mean_roc_auc_no_nan += head_metrics["auc_weighted"]
+                
+                final_metrics[head_name] = head_metrics
+            
+            # Average AUC across all heads
+            mean_roc_auc_no_nan /= total_heads
+            
+        elif config["num_classes"] <= 2 and config["loss"] == "bce_logit_loss":
             final_metrics = compute_classification_metrics(metrics[phase])
             optimal_thresh = compute_optimal_threshold(y, yhat)
             pred_labels = (yhat > optimal_thresh).astype(int)
@@ -650,15 +710,6 @@ def run_training_or_evaluate_orchestrator(
         print("Generating predictions dataframe")
         print(phase)
         if phase == "val" and (best_metrics["best_loss"] <= loss):
-            # print("Shapes of arrays:")
-            # print(f"filenames: {np.array(filenames).shape}")
-            # print(filenames)
-            # print(f"yhat.squeeze(): {yhat.squeeze().shape}")
-            # print(f"y: {np.array(y).shape}")
-            # print(f"task: {type(task)}")  # task is a string, not an array
-            # print(f"phase: {type(phase)}")  # phase is a string, not an array
-            # sprint(f"config: {type(config)}")  # config is a dictionary, not an array
-
             df_predictions = format_dataframe_predictions(
                 filenames, yhat.squeeze(), task, phase, config, y
             )
@@ -997,8 +1048,11 @@ def load_dataset(split, config, transforms, weighted_sampling):
         print("Error: 'mean' or 'std' values are missing.")
         return None, None
     else:
+        target_label = config.get("target_label", None)
+        if config["task"] == "multi_head":
+            target_label = config.get("head_structure", None)
         kwargs = {
-            "target_label": config.get("target_label", None),
+            "target_label": target_label,
             "mean": config["mean"],
             "std": config["std"],
             "length": config["frames"],
@@ -1235,14 +1289,32 @@ def train_or_evaluate_epoch(
             for data, outcomes, fname in dataloader:
                 if config["view_count"] is None:
                     data = data.to(device)
-                    outcomes = outcomes.to(device)
+                    
+                    # Handle outcomes based on whether it's a dictionary
+                    if isinstance(outcomes, dict):
+                        outcomes = {k: v.to(device) for k, v in outcomes.items()}
+                    else:
+                        # If not a dictionary, convert to the expected format
+                        target_label = config.get("target_label")
+                        if isinstance(target_label, str):
+                            target_label = [target_label]
+                        outcomes = {target_label[0]: outcomes.to(device)}
 
                     if config["model_name"] in ["timesformer", "stam"]:
                         data = data.permute(0, 2, 1, 3, 4)
                 else:
                     data = torch.stack(data, dim=1)
                     data = data.to(device)
-                    outcomes = outcomes.to(device)
+                    
+                    # Handle outcomes based on whether it's a dictionary
+                    if isinstance(outcomes, dict):
+                        outcomes = {k: v.to(device) for k, v in outcomes.items()}
+                    else:
+                        # If not a dictionary, convert to the expected format
+                        target_label = config.get("target_label")
+                        if isinstance(target_label, str):
+                            target_label = [target_label]
+                        outcomes = {target_label[0]: outcomes.to(device)}
 
                     if config["model_name"] in ["timesformer", "stam"]:
                         data = data.permute(0, 1, 3, 2, 4, 5)
@@ -1255,6 +1327,13 @@ def train_or_evaluate_epoch(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
                     outputs = model(data)
+                    # Convert outputs to dictionary format if it's not already
+                    if not isinstance(outputs, dict):
+                        target_label = config.get("target_label")
+                        if isinstance(target_label, str):
+                            target_label = [target_label]
+                        outputs = {target_label[0]: outputs}
+                        
                     loss = compute_loss_and_update_metrics(
                         outputs,
                         outcomes,
@@ -1267,8 +1346,18 @@ def train_or_evaluate_epoch(
                         config,
                     )
 
-                predictions.extend(get_predictions_during_training(outputs, task, config))
-                targets.extend(outcomes.detach().cpu().numpy())
+                # Always handle predictions and targets as dictionaries
+                if len(predictions) == 0:
+                    # Initialize predictions list for each head
+                    predictions = {head: [] for head in outputs.keys()}
+                for head_name, head_output in outputs.items():
+                    predictions[head_name].extend(get_predictions_during_training(head_output, task, config))
+                
+                if len(targets) == 0:
+                    # Initialize targets list for each head
+                    targets = {head: [] for head in outcomes.keys()}
+                for head_name, head_outcome in outcomes.items():
+                    targets[head_name].extend(head_outcome.detach().cpu().numpy())
 
                 if is_training:
                     backpropagate(optimizer, scaler, loss)
@@ -1284,6 +1373,14 @@ def train_or_evaluate_epoch(
 
         average_loss = total_loss / total_items
 
+    # For single-head case, extract the single value from the dictionary
+    if task != "multi_head":
+        target_label = config.get("target_label")
+        if isinstance(target_label, str):
+            target_label = [target_label]
+        predictions = predictions[target_label[0]]
+        targets = targets[target_label[0]]
+
     return average_loss, predictions, targets, filenames
 
 
@@ -1297,21 +1394,72 @@ def compute_loss_and_update_metrics(
     outputs, outcomes, task, model_loss, weights, device, metrics, phase, config
 ):
     if task == "regression":
+        # Handle dictionary case for regression
+        if isinstance(outputs, dict):
+            target_label = list(outputs.keys())[0]
+            outputs = outputs[target_label]
+            outcomes = outcomes[target_label]
+            
         outputs = adjust_output_dimensions(outputs)
-        loss = LossRegistry.create(model_loss).cuda(device)(outputs, outcomes)
+        loss = LossRegistry.create(model_loss, outputs, outcomes).to(device)
         metrics[phase].update(outputs, outcomes)
     elif task == "classification":
-        if model_loss == "bce_logit_loss":
-            loss = LossRegistry.create("bce_logit", weight=weights).cuda(device)(outputs, outcomes)
-        elif model_loss == "ce_loss":
-            loss = LossRegistry.create("ce", weight=weights).cuda(device)(outputs, outcomes)
+        if model_loss == "multi_head":
+            # For multi-head loss, outputs and outcomes should be dictionaries
+            if not isinstance(outputs, dict) or not isinstance(outcomes, dict):
+                raise ValueError("For multi-head loss, outputs and outcomes must be dictionaries")
+            
+            # Create the multi-head loss function
+            head_structure = config.get("head_structure")
+            loss_structure = config.get("loss_structure")
+            head_weights = config.get("head_weights")
+            loss_weights = config.get("loss_weights")
+            
+            if head_structure is None:
+                raise ValueError("head_structure must be specified in config for multi-head loss")
+            
+            multi_head_loss = LossRegistry.create(
+                "multi_head",
+                head_structure=head_structure,
+                loss_structure=loss_structure,
+                head_weights=head_weights,
+                loss_weights=loss_weights
+            ).cuda(device)
+            
+            # Compute the total loss and individual losses
+            loss, individual_losses = multi_head_loss(outputs, outcomes)
+            
+            # Update metrics for each head
+            for head_name in head_structure.keys():
+                probabilities = get_probabilities(outputs[head_name], {"num_classes": head_structure[head_name]})
+                update_classification_metrics(
+                    metrics[phase][head_name], probabilities, outcomes[head_name], head_structure[head_name]
+                )
         else:
-            raise ValueError(f"Unsupported loss type: {model_loss}")
-        
-        probabilities = get_probabilities(outputs, config)
-        update_classification_metrics(
-            metrics[phase], probabilities, outcomes, config["num_classes"]
-        )
+            # Handle single-head classification with dictionary inputs
+            if isinstance(outputs, dict):
+                target_label = list(outputs.keys())[0]
+                outputs = outputs[target_label]
+                outcomes = outcomes[target_label]
+
+            # Move weights to the same device as outputs if they exist
+            if weights is not None and isinstance(weights, torch.Tensor):
+                weights = weights.to(device)
+
+            # Convert outcomes to float for BCE loss or long for CE loss
+            if model_loss == "bce_logit_loss":
+                outcomes = outcomes.float()  # Ensure outcomes are float for BCE
+                loss = LossRegistry.create("bce_logit", weight=weights)(outputs, outcomes)
+            elif model_loss == "ce_loss":
+                outcomes = outcomes.long()  # Ensure outcomes are long for CE
+                loss = LossRegistry.create("ce", weight=weights)(outputs, outcomes)
+            else:
+                raise ValueError(f"Unsupported loss type: {model_loss}")
+
+            probabilities = get_probabilities(outputs, config)
+            update_classification_metrics(
+                metrics[phase], probabilities, outcomes, config["num_classes"]
+            )
     return loss
 
 
@@ -1495,6 +1643,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
             task,
             use_amp=True,
         )
+        print("split_yhat", split_yhat)
 
     df_predictions = format_dataframe_predictions(
         filenames, split_yhat, task, split, config, split_y
@@ -1535,29 +1684,69 @@ def determine_class(y_hat):
 
 
 def format_dataframe_predictions(filenames, split_yhat, task, split, config, split_y=None):
-    if split_y is not None and len(split_y) > 0:
-        data = list(zip(filenames, split_y, split_yhat))
-        df_predictions = pd.DataFrame(data, columns=["filename", "y_true", "y_hat"])
-    else:
-        data = list(zip(filenames, split_yhat))
-        df_predictions = pd.DataFrame(data, columns=["filename", "y_hat"])
-
-    if task == "classification":
-        if isinstance(df_predictions["y_hat"].iloc[0], str):
-            try:
-                df_predictions["y_hat"] = df_predictions["y_hat"].apply(
-                    lambda x: np.fromstring(x.strip("[]"), sep=" ")
+    """
+    Format predictions into a pandas DataFrame.
+    
+    Args:
+        filenames: List of filenames
+        split_yhat: Model predictions (can be single output or dictionary for multi-head)
+        task: Task type ('regression', 'classification', or 'multi_head')
+        split: Data split name
+        config: Configuration dictionary
+        split_y: Ground truth values (optional)
+        
+    Returns:
+        pd.DataFrame: Formatted predictions dataframe
+    """
+    if task == "multi_head":
+        # For multi-head, split_yhat and split_y (if provided) are dictionaries
+        # Initialize DataFrame with filenames
+        df_predictions = pd.DataFrame({"filename": filenames})
+        
+        # Process each head's predictions
+        head_structure = config.get("head_structure", {})
+        for head_name, num_classes in head_structure.items():
+            # Add ground truth if available
+            if split_y is not None and len(split_y) > 0:
+                df_predictions[f"{head_name}_y_true"] = split_y[head_name]
+            
+            # Add predictions
+            df_predictions[f"{head_name}_y_hat"] = split_yhat[head_name]
+            
+            # Add argmax class for each head
+            if num_classes <= 2:  # Binary classification
+                df_predictions[f"{head_name}_argmax_class"] = df_predictions[f"{head_name}_y_hat"].apply(
+                    lambda x: 1 if x >= config.get("binary_threshold", 0.5) else 0
                 )
-            except:
-                print("Error converting string to array. Check if the y_hat column is a string.")
-        df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
+            else:  # Multi-class classification
+                df_predictions[f"{head_name}_argmax_class"] = df_predictions[f"{head_name}_y_hat"].apply(
+                    lambda x: np.argmax(x) if isinstance(x, (list, np.ndarray)) else int(x)
+                )
     else:
-        if "binary_threshold" not in config:
-            print("Warning: binary_threshold is not defined in the config")
-        binary_threshold = config.get("binary_threshold", 0.5)
-        df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
-            lambda x: 1 if x >= binary_threshold else 0
-        )
+        # Original logic for single-head predictions
+        if split_y is not None and len(split_y) > 0:
+            data = list(zip(filenames, split_y, split_yhat))
+            df_predictions = pd.DataFrame(data, columns=["filename", "y_true", "y_hat"])
+        else:
+            data = list(zip(filenames, split_yhat))
+            df_predictions = pd.DataFrame(data, columns=["filename", "y_hat"])
+
+        if task == "classification":
+            if isinstance(df_predictions["y_hat"].iloc[0], str):
+                try:
+                    df_predictions["y_hat"] = df_predictions["y_hat"].apply(
+                        lambda x: np.fromstring(x.strip("[]"), sep=" ")
+                    )
+                except:
+                    print("Error converting string to array. Check if the y_hat column is a string.")
+            df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
+        else:
+            if "binary_threshold" not in config:
+                print("Warning: binary_threshold is not defined in the config")
+            binary_threshold = config.get("binary_threshold", 0.5)
+            df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
+                lambda x: 1 if x >= binary_threshold else 0
+            )
 
     return df_predictions
 
