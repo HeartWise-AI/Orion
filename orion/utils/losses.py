@@ -71,6 +71,10 @@ class BCEWithLogitsLoss(Loss):
             outputs = outputs[:, 1]  # Select the second item for binary classification
         elif outputs.dim() > 1 and outputs.size(1) == 1:
             outputs = outputs.squeeze()  # Squeeze the dimension
+        
+        # Convert targets to float type
+        targets = targets.float()
+        
         return self.criterion(outputs, targets)
 
 @LossRegistry.register("ce")
