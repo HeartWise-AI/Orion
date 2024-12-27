@@ -365,8 +365,12 @@ def setup_config(config, transforms, is_master, run):
         run_id = wandb.run.id
         print("Run id", run_id)
         config["run_id"] = run_id
-        if ("output_dir" not in config) or (config["output_dir"] is None):
-            config["output_dir"] = generate_output_dir_name(config, run_id=run_id)
+        
+        generated_output_dir = generate_output_dir_name(config, run_id=run_id)
+        if 'output_dir' in config:
+            config["output_dir"] = os.path.join(config["output_dir"], generated_output_dir)
+        else:
+            config["output_dir"] = generated_output_dir
         pathlib.Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
         wandb.config.update(config, allow_val_change=True)
         print("output_folder created", config["output_dir"])
@@ -523,7 +527,6 @@ def run_training_or_evaluate_orchestrator(
         >>> best_metric = run_training_or_evaluate_orchestrator(model, dataloader, datasets, phase, optimizer, scheduler, config, device, task, weights, metrics, best_metrics, epoch, run, labels_map, scaler)
     """
     do_log = run is not None  # Run is none if process rank is not 0
-    print(f"labels_map before running: {labels_map}")
     model.train() if phase == "train" else model.eval()
     average_losses, predictions, targets, filenames = train_or_evaluate_epoch(
         model,
