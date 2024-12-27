@@ -16,6 +16,7 @@ wandb/
 exported_videos_512_by_512_MHI_UCSF/
 .idea/
 Denis_CathEF_PredictionInvestigation/
+orion-venv
 
 # Ignore specific file types
 *.swp
