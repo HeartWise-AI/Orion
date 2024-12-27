@@ -17,7 +17,12 @@ from sklearn import metrics
 from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 import wandb
+import logging
 
+logging.getLogger('PIL').setLevel(logging.WARNING)         # hide DEBUG messages from PIL
+logging.getLogger('wandb').setLevel(logging.WARNING)       # hide DEBUG messages from wandb
+logging.getLogger('urllib3').setLevel(logging.WARNING)     # hide DEBUG messages from urllib3
+logging.getLogger('matplotlib').setLevel(logging.WARNING)  # hide DEBUG messages from matplotlib
 
 def plot_loss(log_path):
     """
@@ -775,7 +780,6 @@ def update_best_regression_metrics(final_metrics, best_metrics):
 
 def log_binary_classification_metrics_to_wandb(
     phase,
-    epoch,
     loss,
     auc_score,
     optimal_threshold,
@@ -783,36 +787,37 @@ def log_binary_classification_metrics_to_wandb(
     pred_labels,
     label_map,
     learning_rate=None,
-    do_log=False,
 ):
-    if do_log:
-        # Log binary classification metrics to WandB
-        wandb.log({f"{phase}_epoch_loss": loss})
-        wandb.log({f"{phase}_AUC": auc_score})
-        wandb.log({f"{phase}_optimal_thresh": optimal_threshold})
-        # Convert predictions to label format
+    # Log binary classification metrics to WandB
+    wandb.log({f"{phase}_epoch_loss": loss})
+    wandb.log({f"{phase}_AUC": auc_score})
+    wandb.log({f"{phase}_optimal_thresh": optimal_threshold})
+    # Convert predictions to label format
 
-        if pred_labels.ndim > 1 and pred_labels.shape[1] == 1:
-            pred_labels = pred_labels.flatten()
+    if pred_labels.ndim > 1 and pred_labels.shape[1] == 1:
+        pred_labels = pred_labels.flatten()
 
-        # Define your class names (replace with actual class names)
-        # Check if label_map is defined, if not, generate class names based on unique classes in y_true
-        if label_map is None:
-            class_names = ["0", "1"]
-        else:
-            class_names = [str(label) for label in label_map]
+    # Define your class names (replace with actual class names)
+    # Check if label_map is defined, if not, generate class names based on unique classes in y_true
+    if label_map is None:
+        class_names = ["0", "1"]
+    else:
+        class_names = [str(label) for label in label_map]
+        
+    # Log the confusion matrix in wandb
+    wandb.log(
+        {
+            f"{phase}_confusion_matrix": wandb.plot.confusion_matrix(
+                probs=None, 
+                y_true=y_true, 
+                preds=pred_labels, 
+                class_names=class_names
+            )
+        }
+    )
 
-        # Log the confusion matrix in wandb
-        wandb.log(
-            {
-                f"{phase}_confusion_matrix": wandb.plot.confusion_matrix(
-                    probs=None, y_true=y_true, preds=pred_labels, class_names=class_names
-                )
-            }
-        )
-
-        if learning_rate is not None:
-            wandb.log({"learning_rate": learning_rate})
+    if learning_rate is not None:
+        wandb.log({"learning_rate": learning_rate})
 
 
 def log_multiclass_metrics_to_wandb(
@@ -820,13 +825,12 @@ def log_multiclass_metrics_to_wandb(
     epoch,
     metrics_summary,
     labels_map,
+    head_name,
+    loss,
     y_true,
     predictions,
     learning_rate=None,
-    do_log=False,
 ):
-    import seaborn as sns
-
     """Log multi-class metrics to wandb.
 
     Args:
@@ -836,51 +840,52 @@ def log_multiclass_metrics_to_wandb(
         labels_map (dict): A dictionary mapping class indices to class labels.
         y_true (numpy.ndarray): The true labels.
         predictions (numpy.ndarray): The predicted probabilities.
-
-    Raises:
-        None
-
-    Returns:
-        None
-
+        learning_rate (float, optional): The current learning rate.
     """
-    if do_log:
-        # Retrieve metrics
-        # Compute FPR and TPR
-        # fpr, tpr, _ = roc_curve(y_true, predictions)
-        roc_auc = metrics_summary["auc"]
-        conf_mat = metrics_summary["confmat"]
+    # Retrieve metrics
+    roc_auc = metrics_summary["auc"]
+    conf_mat = metrics_summary["confmat"]
+    
+    # Create default labels if labels_map is None
+    if labels_map is None:
+        num_classes = conf_mat.shape[0]  # Get number of classes from confusion matrix
+        labels_map = {f"Class {i}": i for i in range(num_classes)}
+    
+    # Log individual class AUCs
+    for label in labels_map:
+        wandb.log({f"{phase}_roc_auc_class_{head_name}_{label}": roc_auc[labels_map[label]]})
 
-        # Compute y_pred from predictions
-        y_pred = np.argmax(predictions, axis=1)
+    if learning_rate is not None:
+        wandb.log({"learning_rate": learning_rate})
 
-        for i in labels_map.keys():
-            wandb.log({f"{phase}_roc_auc_class_{labels_map[i]}": roc_auc[i]})
+    # For micro averaged AUC
+    wandb.log({f"{phase}_roc_auc_micro_{head_name}": metrics_summary["auc_weighted"]})
 
-        if learning_rate is not None:
-            wandb.log({"learning_rate": learning_rate})
+    # Log the loss
+    wandb.log({f"{phase}_loss_{head_name}": loss})
 
-        # For micro averaged AUC
-        wandb.log({f"{phase}_roc_auc_micro": metrics_summary["auc_weighted"]})
+    # Log the confusion matrix as an image
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Convert labels_map values to list for xticklabels and yticklabels
+    labels_list = list(labels_map.keys())
+    
+    sns.heatmap(
+        conf_mat,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=labels_list,
+        yticklabels=labels_list,
+        ax=ax,
+    )
+    ax.set_xlabel("Predicted Labels")
+    ax.set_ylabel("True Labels")
+    ax.set_title(f"{phase.capitalize()} Confusion Matrix - Epoch {epoch}")
 
-        # Log the confusion matix as an image
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(
-            conf_mat,
-            annot=True,
-            fmt="d",
-            cmap="Blues",
-            xticklabels=labels_map,
-            yticklabels=labels_map,
-            ax=ax,
-        )
-        ax.set_xlabel("Predicted Labels")
-        ax.set_ylabel("True Labels")
-        ax.set_title(f"{phase.capitalize()} Confusion Matrix - Epoch {epoch}")
-
-        # Log the confusion matrix as an image
-        wandb.log({f"{phase}_epoch_{epoch}_confusion_matrix": wandb.Image(fig)})
-        log_multiclass_roc_curve_to_wandb(y_true, predictions, labels_map, roc_auc, phase, epoch)
+    # Log the confusion matrix as an image
+    wandb.log({f"{phase}_epoch_{epoch}_confusion_matrix": wandb.Image(fig)})
+    log_multiclass_roc_curve_to_wandb(y_true, predictions, labels_map, roc_auc, phase, epoch)
 
 
 def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, phase, epoch):
@@ -894,12 +899,9 @@ def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, pha
         auc_array (numpy.ndarray): Array of AUC values for each class.
         phase (str): Current phase ('train', 'val', etc.).
         epoch (int): Current epoch.
-        do_log (bool): Flag to enable logging to wandb.
     """
     # Ensure y_true is of integer type
     y_true = y_true.astype(int)
-
-    # Convert y_true to one-hot encoding
 
     # Convert y_true to one-hot encoding if it's not already
     if y_true.ndim == 1 or y_true.shape[1] == 1:
@@ -925,10 +927,11 @@ def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, pha
             "gray",
         ]
     )
-
+    
+    labels_list = list(labels_map.keys())
     for i, color in zip(range(num_classes), colors):
         fpr, tpr, _ = roc_curve(y_true[:, i], y_pred[:, i])
-        label = labels_map.get(i, f"Class {i}")
+        label = labels_list[i]
         ax.plot(
             fpr,
             tpr,
@@ -944,7 +947,7 @@ def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, pha
     ax.legend(loc="lower right")
 
     wandb.log({f"{phase}_roc_curve": wandb.Image(fig)})
-    for i, label in labels_map.items():
+    for i, label in enumerate(labels_list):
         wandb.log({f"{phase}_roc_auc_class_{label}": auc_array[i]})
 
 
@@ -986,14 +989,13 @@ def update_classification_metrics(metrics, preds, target, num_classes):
         # Update for Multi-Class Classification
         # Convert predictions to label format
         if preds.ndim > 1 and preds.shape[1] == 1:
-            pred_labels = preds.flatten()
+            preds = preds.flatten()
         # Ensure target is an integer tensor
         target = target.long()
         target_one_hot = torch.nn.functional.one_hot(target, num_classes=num_classes)
         metrics["auc"].update(preds, target_one_hot)
         metrics["auc_weighted"].update(preds, target)
         metrics["confmat"].update(preds.argmax(dim=1), target)
-
 
 def compute_classification_metrics(metrics):
     """
