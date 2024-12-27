@@ -140,14 +140,16 @@ class MultiOutputHead(nn.Module):
             head_structure (dict[str, int]): Dictionary mapping head names to their number of output classes
                 e.g. {"contrast_agent": 1, "main_structure": 5, "stent_presence": 1}
         """
-        super().__init__()
+        super(MultiOutputHead, self).__init__()
         self.dropout = nn.Dropout(p=0.5)
-        # Create a separate linear layer for each head
+        self.heads = nn.ModuleDict()
         for head_name, num_classes in head_structure.items():
-            setattr(self, f"{head_name}_head", nn.Linear(dim_in, num_classes))
-        # Store number of classes per head for activation selection
-        self.head_structure = head_structure
+            if not isinstance(num_classes, int) or num_classes < 1:
+                raise ValueError(f"Invalid number of classes for head {head_name}: {num_classes}")
+            self.heads[head_name] = nn.Sequential(RegressionHead(dim_in, num_classes))
 
+        self.head_structure = head_structure
+        
     def forward(self, x):
         """
         Forward pass through all heads.
@@ -157,14 +159,11 @@ class MultiOutputHead(nn.Module):
             
         Returns:
             dict[str, torch.Tensor]: Dictionary mapping head names to their outputs
-                Binary classification heads (num_classes=1) use sigmoid activation
-                Multi-class heads (num_classes>1) use softmax activation
         """
         x = self.dropout(x)
         outputs = {}
-        for head_name in [name.replace('_head', '') for name in self._modules if name != 'dropout']:
-            head_output = getattr(self, f"{head_name}_head")(x)
-            outputs[head_name] = head_output
+        for head_name, head_module in self.heads.items():
+            outputs[head_name] = head_module(x)
         return outputs
 
 def replace_final_layer(model, config):
@@ -182,12 +181,7 @@ def replace_final_layer(model, config):
         if in_features is None:
             raise AttributeError("Unable to determine input features for the final layer")
 
-        if config["task"] == "multi_head":
-            if "head_structure" not in config:
-                raise ValueError("head_structure must be defined in config for multi_head task")
-            model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
-            print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
-        elif "mvit" in config["model_name"].lower():
+        if "mvit" in config["model_name"].lower():
             num_classes = 1 if config["task"] == "regression" else config["num_classes"]
             model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
             print(
@@ -207,11 +201,12 @@ def replace_final_layer(model, config):
                     f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
                 )
             elif config["task"] == "classification":
-                model.head = RegressionHead(dim_in=in_features, num_classes=config["num_classes"])
-                print(
-                    f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
-                )
-
+                if "head_structure" not in config:
+                    raise ValueError("head_structure must be defined in config for multi_head task")                
+                model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
+                print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")      
+            else:
+                raise ValueError(f"Unsupported task: {config['task']}")
     elif hasattr(model, "blocks") and hasattr(model.blocks[-1], "proj"):
         # Check and print in_features or shape of the first block
         if hasattr(model.blocks[0], "proj"):
@@ -230,41 +225,33 @@ def replace_final_layer(model, config):
             in_features = in_features_last_block
 
         # Replace the last block with the appropriate head based on the task
-        if config["task"] == "multi_head":
-            if "head_structure" not in config:
-                raise ValueError("head_structure must be defined in config for multi_head task")
-            model.blocks[-1] = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
-            print(f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
-        elif config["task"] == "regression":
+        if config["task"] == "regression":
             model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
             print(
                 f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
             )
         elif config["task"] == "classification":
-            model.blocks[-1] = RegressionHead(
-                dim_in=in_features, num_classes=config["num_classes"]
-            )
-            print(
-                f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
-            )
+            if "head_structure" not in config:
+                raise ValueError("head_structure must be defined in config for multi_head task")
+            model.blocks[-1] = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
+            print(f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
+        else:
+            raise ValueError(f"Unsupported task: {config['task']}")
     elif hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm):
         in_features = model.head[1].in_features
 
-        if config["task"] == "multi_head":
-            if "head_structure" not in config:
-                raise ValueError("head_structure must be defined in config for multi_head task")
-            model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
-            print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
-        elif config["task"] == "regression":
+        if config["task"] == "regression":
             model.head = RegressionHead(dim_in=in_features, num_classes=1)
             print(
                 f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
             )
         elif config["task"] == "classification":
-            model.head = RegressionHead(dim_in=in_features, num_classes=config["num_classes"])
-            print(
-                f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes={config['num_classes']}) for classification"
-            )
+            if "head_structure" not in config:
+                raise ValueError("head_structure must be defined in config for multi_head task")
+            model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
+            print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")            
+        else:
+            raise ValueError(f"Unsupported task: {config['task']}")
     else:
         raise AttributeError("Unable to determine input features for the final layer")
 
@@ -275,10 +262,12 @@ def load_and_modify_model(config):
     """
     Load a model and modify its final layer based on the configuration.
     """
-    num_classes = config["num_classes"]
+    if not "num_classes" in config and not "head_structure" in config:
+        raise ValueError("num_classes or head_structure must be defined in config")
+    num_classes = config["num_classes"] if "num_classes" in config else 1
     resize = config.get("resize", 256)
     num_frames = config.get("frames", 64)
-
+    print(f"model_name: {config['model_name']}")
     if config["model_name"] == "x3d_multi":
         model = x3d_multi(num_classes, **config)
     elif config["model_name"] == "timesformer":
