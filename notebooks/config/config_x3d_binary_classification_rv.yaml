@@ -27,21 +27,6 @@ class_weights: !!null null
 loss: !!str multi_head  # Use multi-head loss for multiple classification tasks
 task: !!str classification  # Indicates this is a multi-head classification model
 
-# # Label mappings
-# labels_map:
-#   contrast_agent:
-#     "yes": !!int 1
-#     "no": !!int 0
-#   main_structure:
-#     Left Coronary: !!int 0
-#     Right Coronary: !!int 1
-#     Graft: !!int 2
-#     Catheter: !!int 3
-#     Femoral: !!int 4
-#   stent_presence:
-#     present: !!int 1
-#     absent: !!int 0
-
 # Label mappings
 labels_map:
   RV_Alteration:
@@ -52,30 +37,13 @@ labels_map:
 head_structure:
   RV_Alteration: !!int 1
 
-# # Head structure configuration
-# head_structure:
-#   contrast_agent: !!int 1    # Binary classification (0 or 1)
-#   main_structure: !!int 5    # Multi-class classification (5 classes)
-#   stent_presence: !!int 1    # Binary classification (0 or 1)
-
+# Loss structure configuration
 loss_structure:
   RV_Alteration: !!str bce_logit
-
-# # Loss structure configuration
-# loss_structure:
-#   contrast_agent: !!str bce_logit
-#   main_structure: !!str ce
-#   stent_presence: !!str bce_logit
 
 # Head weights configuration
 head_weights:
   RV_Alteration: !!float 1.0
-
-# # Head weights configuration
-# head_weights:
-#   contrast_agent: !!float 1.0
-#   main_structure: !!float 1.0
-#   stent_presence: !!float 1.0
 
 # Scheduler configuration
 scheduler_type: !!str step
