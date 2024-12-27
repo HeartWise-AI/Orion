@@ -115,9 +115,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         config["binary_threshold"] = 0.5
         print("Error: 'binary_threshold' not found in config. Setting it to default value 0.5.")
 
-    print(model_path)
     # Extract the last element of the folder path
-
     if do_log:
         last_folder_name = os.path.basename(model_path)
         entity = run.entity
@@ -136,7 +134,6 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
         run.update()
 
-    print("Model path:", model_path)
     # Model building and training setup
     (
         model,
@@ -147,11 +144,6 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         other_metrics,
         labels_map,
     ) = build_model(config, device, model_path=model_path)
-
-    ## DDP works with TorchDynamo. When used with TorchDynamo, apply the DDP model wrapper before compiling the model,
-    # such that torchdynamo can apply DDPOptimizer (graph-break optimizations) based on DDP bucket sizes.
-    # (See TorchDynamo DDPOptimizer for more information.)
-    model = torch.compile(model)
 
     # watch gradients only for rank 0
     if is_master:
@@ -228,52 +220,19 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             "test": initialize_regression_metrics(device),
         }
     elif config["task"] == "classification":
-        if config["loss"] == "multi_head":
-            head_structure = config.get("head_structure")
-            if head_structure is None:
-                raise ValueError("head_structure must be specified in config for multi-head loss")
-            
-            # Initialize metrics for each head
-            metrics = {phase: {} for phase in ["train", "val", "test"]}
-            for phase in metrics:
-                for head_name, num_classes in head_structure.items():
-                    metrics[phase][head_name] = initialize_classification_metrics(num_classes, device)
-        else:
-            num_classes = config["num_classes"]
-            if num_classes == 2 and config["loss"] == "bce_logit_loss":
-                raise ValueError(
-                    "Binary classification with BCEWithLogitsLoss is not supported with num_classes set to 2. Consider using a different loss function or adjusting num_classes to 1."
-                )
-
-            metrics = {
-                "train": initialize_classification_metrics(num_classes, device),
-                "val": initialize_classification_metrics(num_classes, device),
-                "test": initialize_classification_metrics(num_classes, device),
-            }
-            class_weights = config.get("class_weights", None)
-
-            if class_weights:
-                if len(class_weights) != num_classes:
-                    raise ValueError(
-                        f"Length of class_weights ({len(class_weights)}) does not match num_classes ({num_classes})."
-                    )
-
-            if config["class_weights"] is None:
-                print("Not using weighted sampling and not using class weights specified in config")
-                weights = None
-            elif config["class_weights"] == "balanced_weights":
-                labels = train_dataset.outcome
-                weights = torch.tensor(1 - (np.bincount(labels) / len(labels)), dtype=torch.float32)
-                print("Weights", weights)
-                weights = weights.to(device)
-            else:
-                print("Using class weights specified in config", class_weights)
-                print(len(class_weights))
-                weights = torch.tensor(class_weights, dtype=torch.float32)
-                weights = weights.to(device)
+        weights = None
+        head_structure = config.get("head_structure")
+        if head_structure is None:
+            raise ValueError("head_structure must be specified in config for multi-head loss")
+        
+        # Initialize metrics for each head
+        metrics = {phase: {} for phase in ["train", "val", "test"]}
+        for phase in metrics:
+            for head_name, num_classes in head_structure.items():
+                metrics[phase][head_name] = initialize_classification_metrics(num_classes, device)            
     else:
         raise ValueError(
-            f"Invalid task specified: {task}. Choose 'regression' or 'classification'."
+            f"Invalid task specified: {task}. Choose 'regression', 'classification' or 'multi_head'."
         )
 
     best_metrics = {
@@ -288,6 +247,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         len(dataloaders["train"].dataset),
         len(dataloaders["val"].dataset),
     )
+
     for epoch in range(epoch_resume, config["num_epochs"]):
         print("Epoch #", epoch)
         for phase in ["train", "val"]:
@@ -418,12 +378,16 @@ def setup_config(config, transforms, is_master, run):
             or (config["mean"] is None)
             or (config["std"] is None)
         ):
+            target_label = config.get("target_label", None)
+            if config["task"] == "classification":
+                target_label = config.get("head_structure", None)
+                
             ## Load a dataset for normalization
             mean, std = orion.utils.get_mean_and_std(
                 orion.datasets.Video(
                     root=config["root"],
                     split="train",
-                    target_label=config["target_label"],
+                    target_label=target_label,
                     data_filename=config["data_filename"],
                     datapoint_loc_label=config["datapoint_loc_label"],
                     video_transforms=None,
@@ -550,14 +514,18 @@ def run_training_or_evaluate_orchestrator(
         >>> best_metrics = {'best_mae': None, 'best_rmse': None, 'b\}
         >>> epoch = 1
         >>> run = wandb.Run()
-        >>> labels_map = {0: 'cat', 1: 'dog'}
+        >>> labels_map = {
+            'Category_1': {0: 'No', 1: 'Yes'}, 
+            'Category_2': {0: 'Class_1', 1: 'Class_2', 2: 'Class_3', 3: 'Class_4', 4: 'Class_5'},
+            ...
+        }
         >>> scaler = StandardScaler()
         >>> best_metric = run_training_or_evaluate_orchestrator(model, dataloader, datasets, phase, optimizer, scheduler, config, device, task, weights, metrics, best_metrics, epoch, run, labels_map, scaler)
     """
     do_log = run is not None  # Run is none if process rank is not 0
-
+    print(f"labels_map before running: {labels_map}")
     model.train() if phase == "train" else model.eval()
-    loss, predictions, targets, filenames = train_or_evaluate_epoch(
+    average_losses, predictions, targets, filenames = train_or_evaluate_epoch(
         model,
         dataloader,
         phase == "train",
@@ -574,7 +542,6 @@ def run_training_or_evaluate_orchestrator(
         metrics=metrics,
         config=config,
     )
-
     y = np.array(targets)
     yhat = np.array(predictions)
 
@@ -600,99 +567,80 @@ def run_training_or_evaluate_orchestrator(
         mean_roc_auc_no_nan = 0  # Temporary placeholder
 
         if do_log:
-            log_regression_metrics_to_wandb(phase, final_metrics, loss, learning_rate)
+            log_regression_metrics_to_wandb(phase, final_metrics, average_losses['main_loss'], learning_rate)
             plot_regression_graphics_and_log_binarized_to_wandb(
-                y, yhat, phase, epoch, config["binary_threshold"], config
+                y, 
+                yhat, 
+                phase, 
+                epoch, 
+                config["binary_threshold"], 
+                config
             )
 
             best_metrics, mae, mse, rmse = update_best_regression_metrics(
                 final_metrics, best_metrics
             )
 
-    elif task == "classification":
-        if config["loss"] == "multi_head":
-            # Handle multi-head metrics
-            head_structure = config.get("head_structure")
-            final_metrics = {}
-            mean_roc_auc_no_nan = 0
-            total_heads = len(head_structure)
+    elif task == "classification":            
+        # Log the aggregated loss
+        wandb.log({f"{phase}_epoch_loss": average_losses['main_loss']})
+        
+        # Handle multi-head metrics
+        head_structure = config.get("head_structure")
+        final_metrics = {}
+        mean_roc_auc_no_nan = 0
+        total_heads = len(head_structure)
+        
+        for head_name, num_classes in head_structure.items():
+            y = np.array(targets[head_name])
+            yhat = np.array(predictions[head_name])
+            if num_classes <= 2:
+                # Binary classification for this head]
+                head_metrics = compute_classification_metrics(metrics[phase][head_name])
+                optimal_thresh = compute_optimal_threshold(y, yhat)
+                pred_labels = (yhat > optimal_thresh).astype(int)
+                if do_log:
+                    log_binary_classification_metrics_to_wandb(
+                        phase=f"{phase}_{head_name}",
+                        loss=average_losses[head_name],
+                        auc_score=head_metrics["auc"],
+                        optimal_threshold=optimal_thresh,
+                        y_true=y,
+                        pred_labels=pred_labels,
+                        label_map=labels_map.get(head_name) if labels_map else None,
+                        learning_rate=learning_rate
+                    )
+                mean_roc_auc_no_nan += head_metrics["auc"]
+            else:
+                # Multi-class classification for this head
+                head_metrics = compute_multiclass_metrics(metrics[phase][head_name])
+                if do_log:
+                    log_multiclass_metrics_to_wandb(
+                        phase=phase,
+                        epoch=epoch,
+                        metrics_summary=head_metrics,
+                        labels_map=labels_map.get(head_name) if labels_map else None,
+                        head_name=head_name,
+                        loss=average_losses[head_name],
+                        y_true=y,
+                        predictions=yhat,
+                        learning_rate=learning_rate
+                    )
+                mean_roc_auc_no_nan += head_metrics["auc_weighted"]
             
-            for head_name in head_structure.keys():
-                if head_structure[head_name] <= 2:
-                    # Binary classification for this head
-                    head_metrics = compute_classification_metrics(metrics[phase][head_name])
-                    optimal_thresh = compute_optimal_threshold(y[head_name], yhat[head_name])
-                    pred_labels = (yhat[head_name] > optimal_thresh).astype(int)
-                    
-                    if do_log:
-                        log_binary_classification_metrics_to_wandb(
-                            f"{phase}_{head_name}",
-                            epoch,
-                            loss,
-                            head_metrics["auc"],
-                            optimal_thresh,
-                            y[head_name],
-                            pred_labels,
-                            labels_map.get(head_name) if labels_map else None,
-                            learning_rate,
-                            do_log=True,
-                        )
-                    mean_roc_auc_no_nan += head_metrics["auc"]
-                else:
-                    # Multi-class classification for this head
-                    head_metrics = compute_multiclass_metrics(metrics[phase][head_name])
-                    if do_log:
-                        log_multiclass_metrics_to_wandb(
-                            f"{phase}_{head_name}",
-                            epoch,
-                            head_metrics,
-                            labels_map.get(head_name) if labels_map else None,
-                            y[head_name],
-                            yhat[head_name],
-                            learning_rate,
-                            do_log=True,
-                        )
-                    mean_roc_auc_no_nan += head_metrics["auc_weighted"]
-                
-                final_metrics[head_name] = head_metrics
-            
-            # Average AUC across all heads
-            mean_roc_auc_no_nan /= total_heads
-            
-        elif config["num_classes"] <= 2 and config["loss"] == "bce_logit_loss":
-            final_metrics = compute_classification_metrics(metrics[phase])
-            optimal_thresh = compute_optimal_threshold(y, yhat)
-            pred_labels = (yhat > optimal_thresh).astype(int)
-
-            log_binary_classification_metrics_to_wandb(
-                phase,
-                epoch,
-                loss,
-                final_metrics["auc"],
-                optimal_thresh,
-                y,
-                pred_labels,
-                labels_map,
-                learning_rate,
-                do_log=do_log,
-            )
-
-            mean_roc_auc_no_nan = final_metrics["auc"]
-        else:
-            metrics_summary = compute_multiclass_metrics(metrics[phase])
-            log_multiclass_metrics_to_wandb(
-                phase, epoch, metrics_summary, labels_map, y, yhat, learning_rate, do_log=do_log
-            )
-            # Update the best metrics for multi-class classification, handle logic for your use case
-            mean_roc_auc_no_nan = metrics_summary["auc_weighted"]
-            print(f"Mean ROC AUC score after removing NaNs: {mean_roc_auc_no_nan}")
+            final_metrics[head_name] = head_metrics
+        
+        # Average AUC across all heads
+        mean_roc_auc_no_nan /= total_heads            
 
     # Update and save checkpoints
     if do_log:
+        print(f"best_metrics: {best_metrics}")
+        print(f"mean_roc_auc_no_nan: {mean_roc_auc_no_nan}")
         best_loss, best_auc = update_and_save_checkpoints(
             phase,
             epoch,
-            loss,
+            average_losses['main_loss'],
             mean_roc_auc_no_nan,
             model,
             optimizer,
@@ -705,13 +653,10 @@ def run_training_or_evaluate_orchestrator(
         )
         best_metrics["best_loss"] = best_loss
         best_metrics["best_auc"] = best_auc
-        print("best metrics", best_metrics)
         # Generate and save prediction dataframe
-        print("Generating predictions dataframe")
-        print(phase)
-        if phase == "val" and (best_metrics["best_loss"] <= loss):
+        if phase == "val" and (best_metrics["best_loss"] <= average_losses['main_loss']):
             df_predictions = format_dataframe_predictions(
-                filenames, yhat.squeeze(), task, phase, config, y
+                filenames, predictions, task, config, labels_map, targets
             )
             save_predictions_to_csv(df_predictions, config, phase, epoch)
 
@@ -810,12 +755,10 @@ def update_and_save_checkpoints(
             wandb.log({"best_val_loss": best_loss})
         elif task == "classification":
             if current_loss < best_loss:
-                print("best loss", current_loss)
                 best_loss = current_loss
                 wandb.run.summary["best_loss"] = best_loss
                 wandb.log({"best_val_loss": best_loss})
             if current_auc > best_auc:
-                print("best auc", best_auc)
                 best_auc = current_auc
                 wandb.run.summary["best_auc"] = best_auc
                 wandb.log({"best_val_auc": best_auc})
@@ -893,65 +836,14 @@ def build_model(config, device, model_path=None, for_inference=False):
     # Instantiate model based on configuration
     model = load_and_modify_model(config)
 
-    # Print the entire model architecture to verify the changes
-    # print("Updated model architecture:", model)
-
+    # Set labels_map to None if not defined in the config file
+    labels_map = config.get("labels_map", None)
+    
     # Add the new classification feature
     if config["task"] == "classification":
-        # Attempt to read the CSV file with the specified separator
-        dataset = pd.read_csv(
-            os.path.join(config["data_filename"]),
-            sep="α",
-            engine="python",
-        )
-
-        # Check if the DataFrame has only one column
-        if len(dataset.columns) == 1:
-            print("Warning: Only one column detected. The separator might be incorrect.")
-            # Try to read the CSV file again with a comma as the separator
-            dataset = pd.read_csv(
-                os.path.join(config["data_filename"]),
-                sep=",",
-                engine="python",
-            )
-            # Check if the new DataFrame has more than one column
-            if len(dataset.columns) > 1:
-                print("Successfully read the CSV file using comma as the separator.")
-            else:
-                print(
-                    "Error: Unable to correctly parse the CSV file. Please check the file format and separator."
-                )
-
-        # Adjust labels_map initialization based on num_classes
-        if config["num_classes"] == 1:
-            labels_map = {0: 0, 1: 1}
-        else:
-            labels_map = {i: None for i in range(config["num_classes"])}
-
-        if (for_inference == False) and (config["label_loc_label"] is not None):
-            # Update labels_map with actual labels from dataset
-            for int_label, label in zip(
-                dataset[config["target_label"]], dataset[config["label_loc_label"]]
-            ):
-                # Ensure binary classification for single class scenario
-                if config["num_classes"] == 1 and int(int_label) not in labels_map:
-                    raise ValueError(f"Unexpected label {int_label} for binary classification.")
-                labels_map[int(int_label)] = label
-
-        print("Labels map before sorting:", labels_map)
-        if len(labels_map) > 2 and config["num_classes"] != len(labels_map):
-            raise ValueError(
-                f"Error: The number of classes specified in the config ({config['num_classes']}) does not match the number of unique labels ({len(labels_map)})."
-            )
-
-        # Optionally, sort the labels_map if needed
-        labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
-
-        print("Labels map after sorting:", labels_map)
-
-    else:
-        labels_map = None
-
+        if not labels_map: # TODO: Handle cases where labels_map is None
+            raise ValueError("labels_map is not defined in the config file.") # raise error for now until we handle this case
+    
     # Check if the model should be resumed or used for inference
     if (model_path and config["resume"]) or for_inference:
         # TODO: Test resuming to ensure correct predictions and training continuation
@@ -977,7 +869,6 @@ def build_model(config, device, model_path=None, for_inference=False):
         else:
             checkpoint = torch.load(model_path, weights_only=True)
         # Uncomment below to debug checkpoint content
-        # print("Model checkpoint content:", checkpoint)
         try:
             model_state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict"))
 
@@ -1049,7 +940,7 @@ def load_dataset(split, config, transforms, weighted_sampling):
         return None, None
     else:
         target_label = config.get("target_label", None)
-        if config["task"] == "multi_head":
+        if config["task"] == "classification":
             target_label = config.get("head_structure", None)
         kwargs = {
             "target_label": target_label,
@@ -1099,7 +990,21 @@ def get_predictions(
     use_amp=None,
 ):
     model.eval()  # Set the model to evaluation mode
-    predictions, targets, filenames = [], [], []
+    predictions, targets = {}, {}
+    filenames = []
+    
+    # Initialize predictions and targets based on task
+    if task == "classification":
+        # Initialize for each head in head_structure
+        head_structure = config.get("head_structure", {})
+        for head_name in head_structure:
+            predictions[head_name] = []
+            targets[head_name] = []
+    else:
+        # For single-head tasks, use a single key
+        target_label = config.get("labels_map", "main")
+        predictions[target_label] = []
+        targets[target_label] = []
 
     with torch.inference_mode():  # Disable gradient calculations
         with tqdm.tqdm(total=len(dataloader)) as pbar:
@@ -1125,7 +1030,6 @@ def get_predictions(
                     data = data.permute(0, 1, 3, 2, 4, 5)
 
                 if config["view_count"] is not None and config["view_count"] >= 1:
-
                     def flatten(lst):
                         """Recursively flattens a nested list."""
                         if isinstance(lst, list):
@@ -1152,14 +1056,22 @@ def get_predictions(
                     filenames.extend(grouped_filenames)
                 else:
                     filenames.extend(fname)
+
+                # Handle targets
                 if outcomes is not None and hasattr(outcomes, "detach"):
-                    # Check if outcomes is not empty
-                    if outcomes.nelement() > 0:
-                        targets.extend(outcomes.detach().cpu().numpy())
+                    if isinstance(outcomes, dict):
+                        # Multi-head case: outcomes is already a dictionary
+                        for head_name, head_outcomes in outcomes.items():
+                            if head_outcomes.nelement() > 0:
+                                targets[head_name].extend(head_outcomes.detach().cpu().numpy())
+                    else:
+                        # Single-head case: wrap outcome in dictionary
+                        target_label = config.get("target_label", "main")
+                        if outcomes.nelement() > 0:
+                            targets[target_label].extend(outcomes.detach().cpu().numpy())
+
                 # Handle non-4D data if block_size is provided
-                if (
-                    config.get("block_size") is not None and len(data.shape) == 5
-                ):  # assuming shape is (B, T, C, H, W)
+                if config.get("block_size") is not None and len(data.shape) == 5:
                     batch_size, frames, channels, height, width = data.shape
                     data = data.view(batch_size * frames, channels, height, width)
 
@@ -1167,24 +1079,30 @@ def get_predictions(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
                     outputs = model(data)  # Get model outputs
-                    # Process outputs for regression or classification tasks
-                    if task == "regression":
-                        predictions.extend(outputs.detach().view(-1).cpu().numpy())
-                    elif task == "classification":
-                        if outputs.dim() <= 2:
-                            # For binary classification, add an extra dimension to make it [batch_size, 1]
-                            predictions.extend(
-                                torch.sigmoid(outputs).detach().cpu().numpy()
-                            )  ## Add sigmoid to get 0 -1 predictions
-                        else:
-                            predictions.extend(
-                                torch.softmax(outputs, dim=1).detach().cpu().numpy()
-                            )  # Softmax for classification
+                    
+                    # Convert outputs to dictionary format if it's not already
+                    if not isinstance(outputs, dict):
+                        target_label = config.get("target_label", "main")
+                        outputs = {target_label: outputs}
 
-                pbar.update()  # Ensure this is correctly indented
-                pbar.set_description(
-                    f"Processing batch {i+1}/{len(dataloader)}"
-                )  # Optional: set a manual description
+                    # Process each output based on task and number of classes
+                    for head_name, head_outputs in outputs.items():
+                        if task == "regression":
+                            predictions[head_name].extend(head_outputs.detach().view(-1).cpu().numpy())
+                        elif task == "classification":
+                            num_classes = head_outputs.shape[1]
+                            if num_classes < 2:
+                                # Binary classification
+                                predictions[head_name].extend(
+                                    torch.sigmoid(head_outputs).detach().cpu().numpy()
+                                )
+                            else:
+                                # Multi-class classification
+                                predictions[head_name].extend(
+                                    torch.softmax(head_outputs, dim=1).detach().cpu().numpy()
+                                )
+                pbar.update()
+                pbar.set_description(f"Processing batch {i+1}/{len(dataloader)}")
 
     return predictions, targets, filenames
 
@@ -1278,15 +1196,22 @@ def train_or_evaluate_epoch(
     config=None,
 ):
     model.train(is_training)
-    total_loss = 0.0
-    total_items = 0
-    predictions, targets, filenames = [], [], []
+    total_losses = {}
+    
+    # Initialize predictions and targets based on task
+    if task == "classification":
+        predictions = {}
+        targets = {}
+    else:
+        predictions = []
+        targets = []
+    
+    filenames = []
     model_loss = config.get("loss")
-    print("is_training", is_training)
-
+    
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
-            for data, outcomes, fname in dataloader:
+            for batch_idx, (data, outcomes, fname) in enumerate(dataloader, 1): 
                 if config["view_count"] is None:
                     data = data.to(device)
                     
@@ -1298,7 +1223,7 @@ def train_or_evaluate_epoch(
                         target_label = config.get("target_label")
                         if isinstance(target_label, str):
                             target_label = [target_label]
-                        outcomes = {target_label[0]: outcomes.to(device)}
+                        outcomes = {target_label[0]: outcomes.to(device)} 
 
                     if config["model_name"] in ["timesformer", "stam"]:
                         data = data.permute(0, 2, 1, 3, 4)
@@ -1327,14 +1252,14 @@ def train_or_evaluate_epoch(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
                     outputs = model(data)
+                    
                     # Convert outputs to dictionary format if it's not already
                     if not isinstance(outputs, dict):
-                        target_label = config.get("target_label")
-                        if isinstance(target_label, str):
-                            target_label = [target_label]
-                        outputs = {target_label[0]: outputs}
+                        target_label = config.get("target_label", "main")
+                        outputs = {target_label: outputs}
                         
-                    loss = compute_loss_and_update_metrics(
+                    # Now returns a dictionnary of losses {"main_loss": main_loss, "loss_1": loss_1, "loss_2": loss_2, ...}    
+                    losses = compute_loss_and_update_metrics(
                         outputs,
                         outcomes,
                         task,
@@ -1346,42 +1271,38 @@ def train_or_evaluate_epoch(
                         config,
                     )
 
-                # Always handle predictions and targets as dictionaries
-                if len(predictions) == 0:
-                    # Initialize predictions list for each head
-                    predictions = {head: [] for head in outputs.keys()}
-                for head_name, head_output in outputs.items():
-                    predictions[head_name].extend(get_predictions_during_training(head_output, task, config))
-                
-                if len(targets) == 0:
-                    # Initialize targets list for each head
-                    targets = {head: [] for head in outcomes.keys()}
-                for head_name, head_outcome in outcomes.items():
-                    targets[head_name].extend(head_outcome.detach().cpu().numpy())
+                # Initialize predictions and targets dictionaries for each head if not already done
+                for head_name in outputs.keys():
+                    if head_name not in predictions:
+                        predictions[head_name] = []
+                    if head_name not in targets:
+                        targets[head_name] = []
+                    
+                    # Add predictions and targets for each head
+                    predictions[head_name].extend(
+                        get_predictions_during_training(outputs[head_name], task)
+                    )
+                    targets[head_name].extend(outcomes[head_name].detach().cpu().numpy())
 
                 if is_training:
-                    backpropagate(optimizer, scaler, loss)
-
-                total_loss += loss.item() * data.size(0)
-                total_items += data.size(0)
-
-                pbar.set_postfix(loss=(total_loss / total_items))
+                    backpropagate(optimizer, scaler, losses["main_loss"])
+                
+                # Add the losses to the total_losses dictionary
+                for loss_name, loss_value in losses.items():
+                    total_losses[loss_name] = total_losses.get(loss_name, 0.0) + loss_value.item()
+                
+                # Update the progress bar with the running average of the losses
+                pbar.set_postfix(**{loss_name: (total_losses[loss_name] / batch_idx) for loss_name in losses})
                 pbar.update()
 
-            if not is_training and phase == "val" and scheduler is not None:
-                scheduler.step(loss)
+        # Calculate average losses for the epoch
+        average_losses = {loss_name: total_losses[loss_name] / len(dataloader) for loss_name in total_losses}
+            
+        # Update the scheduler if not training and on validation phase
+        if not is_training and phase == "val" and scheduler is not None:
+            scheduler.step(average_losses["main_loss"])
 
-        average_loss = total_loss / total_items
-
-    # For single-head case, extract the single value from the dictionary
-    if task != "multi_head":
-        target_label = config.get("target_label")
-        if isinstance(target_label, str):
-            target_label = [target_label]
-        predictions = predictions[target_label[0]]
-        targets = targets[target_label[0]]
-
-    return average_loss, predictions, targets, filenames
+    return average_losses, predictions, targets, filenames
 
 
 def handle_block_size(data):
@@ -1393,6 +1314,7 @@ def handle_block_size(data):
 def compute_loss_and_update_metrics(
     outputs, outcomes, task, model_loss, weights, device, metrics, phase, config
 ):
+    losses = {}
     if task == "regression":
         # Handle dictionary case for regression
         if isinstance(outputs, dict):
@@ -1402,65 +1324,49 @@ def compute_loss_and_update_metrics(
             
         outputs = adjust_output_dimensions(outputs)
         loss = LossRegistry.create(model_loss, outputs, outcomes).to(device)
+        losses["main_loss"] = loss
         metrics[phase].update(outputs, outcomes)
+        
     elif task == "classification":
-        if model_loss == "multi_head":
-            # For multi-head loss, outputs and outcomes should be dictionaries
-            if not isinstance(outputs, dict) or not isinstance(outcomes, dict):
-                raise ValueError("For multi-head loss, outputs and outcomes must be dictionaries")
+        # For multi-head loss, outputs and outcomes should be dictionaries
+        if not isinstance(outputs, dict) or not isinstance(outcomes, dict):
+            raise ValueError("For multi-head loss, outputs and outcomes must be dictionaries")
             
-            # Create the multi-head loss function
-            head_structure = config.get("head_structure")
-            loss_structure = config.get("loss_structure")
-            head_weights = config.get("head_weights")
-            loss_weights = config.get("loss_weights")
-            
-            if head_structure is None:
-                raise ValueError("head_structure must be specified in config for multi-head loss")
-            
-            multi_head_loss = LossRegistry.create(
-                "multi_head",
-                head_structure=head_structure,
-                loss_structure=loss_structure,
-                head_weights=head_weights,
-                loss_weights=loss_weights
-            ).cuda(device)
-            
-            # Compute the total loss and individual losses
-            loss, individual_losses = multi_head_loss(outputs, outcomes)
-            
-            # Update metrics for each head
-            for head_name in head_structure.keys():
-                probabilities = get_probabilities(outputs[head_name], {"num_classes": head_structure[head_name]})
-                update_classification_metrics(
-                    metrics[phase][head_name], probabilities, outcomes[head_name], head_structure[head_name]
-                )
-        else:
-            # Handle single-head classification with dictionary inputs
-            if isinstance(outputs, dict):
-                target_label = list(outputs.keys())[0]
-                outputs = outputs[target_label]
-                outcomes = outcomes[target_label]
-
-            # Move weights to the same device as outputs if they exist
-            if weights is not None and isinstance(weights, torch.Tensor):
-                weights = weights.to(device)
-
-            # Convert outcomes to float for BCE loss or long for CE loss
-            if model_loss == "bce_logit_loss":
-                outcomes = outcomes.float()  # Ensure outcomes are float for BCE
-                loss = LossRegistry.create("bce_logit", weight=weights)(outputs, outcomes)
-            elif model_loss == "ce_loss":
-                outcomes = outcomes.long()  # Ensure outcomes are long for CE
-                loss = LossRegistry.create("ce", weight=weights)(outputs, outcomes)
-            else:
-                raise ValueError(f"Unsupported loss type: {model_loss}")
-
-            probabilities = get_probabilities(outputs, config)
+        # Create the multi-head loss function
+        head_structure = config.get("head_structure", None)
+        loss_structure = config.get("loss_structure", None)
+        head_weights = config.get("head_weights", None)
+        loss_weights = config.get("loss_weights", None)
+        
+        if head_structure is None:
+            raise ValueError("head_structure must be specified in config for multi-head loss")
+        if loss_structure is None:
+            raise ValueError("loss_structure must be specified in config for multi-head loss")
+        
+        multi_head_loss = LossRegistry.create(
+            "multi_head",
+            head_structure=head_structure,
+            loss_structure=loss_structure,
+            head_weights=head_weights,
+            loss_weights=loss_weights
+        ).cuda(device)
+        
+        # Compute the total loss and individual losses
+        loss, individual_losses = multi_head_loss(outputs, outcomes)
+        losses["main_loss"] = loss
+        losses.update(individual_losses)
+        # Update metrics for each head
+        for head_name in head_structure.keys():
+            num_classes = head_structure[head_name]
+            probabilities = get_probabilities(outputs[head_name], {"num_classes": num_classes})
             update_classification_metrics(
-                metrics[phase], probabilities, outcomes, config["num_classes"]
+                metrics[phase][head_name], 
+                probabilities, 
+                outcomes[head_name], 
+                num_classes
             )
-    return loss
+
+    return losses
 
 
 def adjust_output_dimensions(outputs):
@@ -1474,9 +1380,7 @@ def adjust_output_dimensions(outputs):
 def get_probabilities(outputs, config):
     if config["num_classes"] <= 2:
         if outputs.ndim > 1 and outputs.shape[1] == 2:
-            probabilities = torch.sigmoid(outputs)[
-                :, 1
-            ]  # Use the second column for binary classification
+            probabilities = torch.sigmoid(outputs)[:, 1]  # Use the second column for binary classification
         elif outputs.ndim > 1 and outputs.shape[1] == 1:
             probabilities = torch.sigmoid(outputs).squeeze()  # Squeeze the dimension
         else:
@@ -1488,18 +1392,14 @@ def get_probabilities(outputs, config):
     return probabilities
 
 
-def get_predictions_during_training(outputs, task, config):
+def get_predictions_during_training(outputs, task):
     if task == "regression":
         return outputs.detach().view(-1).cpu().numpy()
     elif task == "classification":
-        if config["num_classes"] <= 2:
-            if outputs.ndim > 1 and outputs.shape[1] == 2:
-                outputs = outputs[:, 1]  # Use the second column for binary classification
-            elif outputs.ndim > 1 and outputs.shape[1] == 1:
-                outputs = outputs.squeeze()  # Squeeze the dimension
+        if outputs.shape[1] == 1:
+            outputs = outputs.squeeze()
             return torch.sigmoid(outputs).detach().cpu().numpy()
-        else:
-            return torch.softmax(outputs, dim=1).detach().cpu().numpy()
+        return torch.softmax(outputs, dim=1).detach().cpu().numpy()
 
 
 def backpropagate(optimizer, scaler, loss):
@@ -1527,8 +1427,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
 
     # Use model_path from config, or default to config["output_dir"] if model_path is None
     model_path = config.get("model_path")
-    print("model path", model_path)
-
+    
     task = config.get("task", "regression")
     (
         model,
@@ -1555,11 +1454,11 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
 
     if log_wandb:
         (
-            split_loss,
-            split_yhat,
-            split_y,
+            average_losses,
+            predictions,
+            targets,
             filenames,
-        ) = orion.utils.video_training_and_eval.train_or_evaluate_epoch(
+        ) = train_or_evaluate_epoch(
             model,
             split_dataloader,
             is_training=False,
@@ -1578,14 +1477,12 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
         )
 
         # Convert targets and predictions to numpy arrays for subsequent calculations
-        split_y = np.array(split_y)
-        split_yhat = np.array(split_yhat)
+        targets = np.array(targets)
+        predictions = np.array(predictions)
 
         # Process the output according to the task type
         if task == "regression":
             # Compute final metrics for regression
-            # print("Current phase:", split)
-            # print("Available keys in metrics:", metrics.keys())
             final_metrics = metrics[split].compute()
             metrics[split].reset()
 
@@ -1595,47 +1492,53 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
             )
 
             # Log regression metrics
-            log_regression_metrics_to_wandb(split, final_metrics, split_loss, 0)
+            log_regression_metrics_to_wandb(split, final_metrics, average_losses['main_loss'], 0)
             # Plot regression graphics
             plot_regression_graphics_and_log_binarized_to_wandb(
-                split_y, split_yhat, split, epoch_resume, config["binary_threshold"], config
+                targets, predictions, split, epoch_resume, config["binary_threshold"], config
             )
 
-        elif task == "classification":
-            if config["num_classes"] <= 2:
-                final_metrics = compute_classification_metrics(metrics[split])
-                optimal_thresh = compute_optimal_threshold(split_y, split_yhat)
-                pred_labels = (split_yhat > optimal_thresh).astype(int)
-                # Binary classification logging
-                log_binary_classification_metrics_to_wandb(
-                    split,
-                    epoch_resume,
-                    split_loss,
-                    final_metrics["auc"],
-                    optimal_thresh,
-                    split_y,
-                    pred_labels,
-                    labels_map,
-                    do_log=True,
-                )
-
-            else:
-                metrics_summary = compute_multiclass_metrics(metrics[split])
-
-                # Multiclass classification logging
-                log_multiclass_metrics_to_wandb(
-                    split,
-                    epoch_resume,
-                    metrics_summary,
-                    labels_map,
-                    split_y,
-                    split_yhat,
-                    0,
-                    do_log=True,
-                )
+        elif task == "classification":   
+            # Handle multi-head metrics
+            head_structure = config.get("head_structure")
+            phase = split
+            epoch = epoch_resume
+            for head_name, num_classes in head_structure.items():
+                y = np.array(targets[head_name])
+                yhat = np.array(predictions[head_name])
+                if num_classes <= 2:
+                    # Binary classification for this head
+                    head_metrics = compute_classification_metrics(metrics[phase][head_name])
+                    optimal_thresh = compute_optimal_threshold(y, yhat)
+                    pred_labels = (yhat > optimal_thresh).astype(int)
+                    log_binary_classification_metrics_to_wandb(
+                        phase=f"{phase}_{head_name}",
+                        loss=average_losses[head_name],
+                        auc_score=head_metrics["auc"],
+                        optimal_threshold=optimal_thresh,
+                        y_true=y,
+                        pred_labels=pred_labels,
+                        label_map=labels_map.get(head_name) if labels_map else None,
+                        learning_rate=0
+                    )
+                else:
+                    # Multi-class classification for this head
+                    head_metrics = compute_multiclass_metrics(metrics[phase][head_name])
+                    log_multiclass_metrics_to_wandb(
+                        phase=phase,
+                        epoch=epoch,
+                        metrics_summary=head_metrics,
+                        labels_map=labels_map.get(head_name) if labels_map else None,
+                        head_name=head_name,
+                        loss=average_losses[head_name],
+                        y_true=y,
+                        predictions=yhat,
+                        learning_rate=0
+                    )
+                
     else:
         print("Performing inference only on new dataset. No WANDB logging")
-        split_yhat, split_y, filenames = get_predictions(
+        predictions, targets, filenames = get_predictions(
             model,
             split_dataloader,
             device,
@@ -1643,10 +1546,8 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
             task,
             use_amp=True,
         )
-        print("split_yhat", split_yhat)
-
     df_predictions = format_dataframe_predictions(
-        filenames, split_yhat, task, split, config, split_y
+        filenames, predictions, task, config, labels_map, targets
     )
 
     save_predictions_to_csv(df_predictions, config, split, "inference")
@@ -1682,71 +1583,58 @@ def determine_class(y_hat):
     else:
         raise ValueError(f"Unsupported type or content for y_hat: {y_hat}")
 
-
-def format_dataframe_predictions(filenames, split_yhat, task, split, config, split_y=None):
+#TODO This function never supported regression output
+def format_dataframe_predictions(filenames, predictions, task, config, labels_map, targets):
     """
     Format predictions into a pandas DataFrame.
     
     Args:
         filenames: List of filenames
-        split_yhat: Model predictions (can be single output or dictionary for multi-head)
+        predictions: Model predictions (can be single output or dictionary for multi-head)
         task: Task type ('regression', 'classification', or 'multi_head')
-        split: Data split name
         config: Configuration dictionary
-        split_y: Ground truth values (optional)
+        labels_map: Mapping of label indices to label names
+        targets: Ground truth values (optional)
         
     Returns:
         pd.DataFrame: Formatted predictions dataframe
     """
-    if task == "multi_head":
-        # For multi-head, split_yhat and split_y (if provided) are dictionaries
+    if task == "classification":
         # Initialize DataFrame with filenames
         df_predictions = pd.DataFrame({"filename": filenames})
         
         # Process each head's predictions
         head_structure = config.get("head_structure", {})
         for head_name, num_classes in head_structure.items():
-            # Add ground truth if available
-            if split_y is not None and len(split_y) > 0:
-                df_predictions[f"{head_name}_y_true"] = split_y[head_name]
-            
-            # Add predictions
-            df_predictions[f"{head_name}_y_hat"] = split_yhat[head_name]
-            
-            # Add argmax class for each head
-            if num_classes <= 2:  # Binary classification
-                df_predictions[f"{head_name}_argmax_class"] = df_predictions[f"{head_name}_y_hat"].apply(
-                    lambda x: 1 if x >= config.get("binary_threshold", 0.5) else 0
-                )
-            else:  # Multi-class classification
-                df_predictions[f"{head_name}_argmax_class"] = df_predictions[f"{head_name}_y_hat"].apply(
-                    lambda x: np.argmax(x) if isinstance(x, (list, np.ndarray)) else int(x)
-                )
-    else:
-        # Original logic for single-head predictions
-        if split_y is not None and len(split_y) > 0:
-            data = list(zip(filenames, split_y, split_yhat))
-            df_predictions = pd.DataFrame(data, columns=["filename", "y_true", "y_hat"])
-        else:
-            data = list(zip(filenames, split_yhat))
-            df_predictions = pd.DataFrame(data, columns=["filename", "y_hat"])
 
-        if task == "classification":
-            if isinstance(df_predictions["y_hat"].iloc[0], str):
-                try:
-                    df_predictions["y_hat"] = df_predictions["y_hat"].apply(
-                        lambda x: np.fromstring(x.strip("[]"), sep=" ")
-                    )
-                except:
-                    print("Error converting string to array. Check if the y_hat column is a string.")
-            df_predictions["argmax_class"] = df_predictions["y_hat"].apply(determine_class)
-        else:
-            if "binary_threshold" not in config:
-                print("Warning: binary_threshold is not defined in the config")
-            binary_threshold = config.get("binary_threshold", 0.5)
-            df_predictions["argmax_class"] = df_predictions["y_hat"].apply(
-                lambda x: 1 if x >= binary_threshold else 0
-            )
+            # Add ground truth if available
+            if targets is not None and len(targets[head_name]) > 0:
+                df_predictions[f"target_{head_name}"] = np.array(targets[head_name])
+            
+            # Handle predictions based on number of classes
+            head_predictions = np.array(predictions[head_name])
+            
+            if num_classes < 2:  # Binary classification
+                # For binary classification, store raw probabilities
+                df_predictions[f"pred_{head_name}"] = head_predictions
+                # Store predicted class
+                df_predictions[f"{head_name}_class"] = (
+                    head_predictions >= config.get("binary_threshold", 0.5)
+                ).astype(int)
+            else:  # Multi-class classification
+                # Store probabilities for each class
+                for class_name, idx in labels_map[head_name].items():
+                    df_predictions[f"{head_name}_prob_class_{class_name}"] = head_predictions[:, idx]
+                # Store predicted class
+                df_predictions[f"{head_name}_class"] = np.argmax(head_predictions, axis=1)
+                
+    elif task == "regression": #TODO doing this for regression for now
+        df_predictions = pd.DataFrame({"filename": filenames})
+        df_predictions["pred"] = predictions
+        df_predictions["target"] = targets
+
+    else:
+        raise ValueError(f"Unsupported task: {task}")
 
     return df_predictions
 
@@ -1767,8 +1655,8 @@ def save_predictions_to_csv(df_predictions, config, split, epoch):
     best_filename = f"{split}_predictions_epoch_best.csv"
 
     # Construct the output path
-    output_path = os.path.join(config["output_dir"], model_dir, filename)
-    best_output_path = os.path.join(config["output_dir"], model_dir, best_filename)
+    output_path = os.path.join(config["output_dir"], filename)
+    best_output_path = os.path.join(config["output_dir"], best_filename)
 
     # Ensure the directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -1877,6 +1765,7 @@ def main():
 
     with open(args.config_path) as file:
         config_defaults = yaml.safe_load(file)
+        print("Initial config", config_defaults)
         # print("Initial config", config_defaults)
     # Check if the script is running in sweep mode
     # Initialize a WandB run if logging, otherwise return None
