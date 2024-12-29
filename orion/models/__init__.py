@@ -262,7 +262,7 @@ def load_and_modify_model(config):
     """
     Load a model and modify its final layer based on the configuration.
     """
-    if not "num_classes" in config and not "head_structure" in config:
+    if "num_classes" not in config and "head_structure" not in config:
         raise ValueError("num_classes or head_structure must be defined in config")
     num_classes = config["num_classes"] if "num_classes" in config else 1
     resize = config.get("resize", 256)
