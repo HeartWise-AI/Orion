@@ -161,10 +161,10 @@ class MultiOutputHead(nn.Module):
             dict[str, torch.Tensor]: Dictionary mapping head names to their outputs
         """
         x = self.dropout(x)
-        outputs = {}
-        for head_name, head_module in self.heads.items():
-            outputs[head_name] = head_module(x)
-        return outputs
+        return {
+            head_name: head_module(x)
+            for head_name, head_module in self.heads.items()
+        }
 
 def replace_final_layer(model, config):
     """
