@@ -790,7 +790,7 @@ def log_binary_classification_metrics_to_wandb(
 ):
     # Log binary classification metrics to WandB
     wandb.log({f"{phase}_epoch_loss": loss})
-    wandb.log({f"{phase}_AUC": auc_score})
+    wandb.log({f"{phase}_auc": auc_score})
     wandb.log({f"{phase}_optimal_thresh": optimal_threshold})
     # Convert predictions to label format
 
@@ -853,16 +853,16 @@ def log_multiclass_metrics_to_wandb(
     
     # Log individual class AUCs
     for label in labels_map:
-        wandb.log({f"{phase}_roc_auc_class_{head_name}_{label}": roc_auc[labels_map[label]]})
+        wandb.log({f"{phase}_roc_auc_macro_for_head_{head_name}_class_{label}": roc_auc[labels_map[label]]})
 
     if learning_rate is not None:
         wandb.log({"learning_rate": learning_rate})
 
     # For micro averaged AUC
-    wandb.log({f"{phase}_roc_auc_micro_{head_name}": metrics_summary["auc_weighted"]})
+    wandb.log({f"{phase}_roc_auc_micro_for_head_{head_name}": metrics_summary["auc_weighted"]})
 
     # Log the loss
-    wandb.log({f"{phase}_loss_{head_name}": loss})
+    wandb.log({f"{phase}_loss_for_head_{head_name}": loss})
 
     # Log the confusion matrix as an image
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -885,10 +885,10 @@ def log_multiclass_metrics_to_wandb(
 
     # Log the confusion matrix as an image
     wandb.log({f"{phase}_epoch_{epoch}_confusion_matrix": wandb.Image(fig)})
-    log_multiclass_roc_curve_to_wandb(y_true, predictions, labels_map, roc_auc, phase, epoch)
+    log_multiclass_roc_curve_to_wandb(y_true, predictions, labels_map, roc_auc, phase, epoch, head_name)
 
 
-def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, phase, epoch):
+def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, phase, epoch, head_name):
     """
     Log multi-class ROC curves to wandb.
 
@@ -943,12 +943,10 @@ def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, pha
     ax.plot([0, 1], [0, 1], "k--", lw=2)
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate")
-    ax.set_title(f"Multi-Class ROC Curve for {phase.capitalize()} - Epoch {epoch}")
+    ax.set_title(f"ROC Curve for head {head_name} - {phase.capitalize()} - Epoch {epoch}")
     ax.legend(loc="lower right")
 
-    wandb.log({f"{phase}_roc_curve": wandb.Image(fig)})
-    for i, label in enumerate(labels_list):
-        wandb.log({f"{phase}_roc_auc_class_{label}": auc_array[i]})
+    wandb.log({f"{phase}_roc_curve_for_head_{head_name}": wandb.Image(fig)})
 
 
 def compute_optimal_threshold(y_true, y_scores):
