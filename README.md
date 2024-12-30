@@ -6,22 +6,17 @@ Orion is a Python-based application designed for video training and evaluation t
 
 1. Ensure you have Python 3.10 or later installed.
 
-1. It is recommended to use Conda and create a new environment as such: `conda create -n orion python=3.10 anaconda`
-
-1. `conda activate orion`
-
-1. Install Poetry, a Python package manager. You can do this by running the following commands:
+2. Create a new environment and install the dependencies using uv.
 
    ```bash
-   python3 -m pip install --user pipx
-   export PATH="$PATH:/root/.local/bin"
-   source ~/.zshrc  # or source ~/.bashrc
-   pipx install poetry
+   python -m venv orion-venv
+   source orion-venv/bin/activate
+   pip install --upgrade pip
+   pip install uv
+   uv pip install -r requirements.txt
    ```
 
-1. Then run `poetry install` to install all dependencies in your LOCAL environment.
-
-1. Ensure you have an account on wandb.ai and that you've logged in using `wandb login`
+3. Ensure you have an account on wandb.ai and that you've logged in using `wandb login`
 
 ## Usage
 

@@ -26,6 +26,9 @@ parameters:
     max: 15
   factor:
     values: [0.3, 0.5]
+early_terminate:
+  type: hyperband
+  min_iter: 3    
 command:
   - /volume/Orion/notebooks/config/runner.sh
   - ${program}
