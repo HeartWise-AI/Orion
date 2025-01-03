@@ -19,8 +19,9 @@ class Args:
     @staticmethod
     def verify_splits(splits: list[str]) -> list[str]:
         valid_splits = {'val', 'test', 'inference'}
-        invalid_splits = [split for split in splits if split not in valid_splits]
-        if invalid_splits:
+        if invalid_splits := [
+            split for split in splits if split not in valid_splits
+        ]:
             raise ValueError(
                 f"Invalid split(s): {invalid_splits}. "
                 f"Splits must be one or more of: {', '.join(valid_splits)}"
