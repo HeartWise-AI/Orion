@@ -938,13 +938,19 @@ def load_dataset(split, config, transforms, weighted_sampling):
     Returns:
         DataLoader: The DataLoader for the specified dataset split.
     """
-    if config["mean"] is None or config["std"] is None:
-        print("Error: 'mean' or 'std' values are missing.")
-        return None, None
+    missing_fields = []
+    if config["mean"] is None:
+        missing_fields.append("mean")
+    if config["std"] is None:
+        missing_fields.append("std")
+    if missing_fields:
+        raise ValueError(f"Error: The following fields are missing: {', '.join(missing_fields)}")
     else:
-        target_label = config.get("target_label", None)
+        target_label = config.get("label_loc_label", None)
         if config["task"] == "classification":
-            target_label = config.get("head_structure", None)
+            if config.get("head_structure", None) != target_label and split == "train":
+                raise ValueError("Error: head_structure does not match target_label")
+            
         kwargs = {
             "target_label": target_label,
             "mean": config["mean"],
