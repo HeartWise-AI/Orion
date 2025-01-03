@@ -1,9 +1,9 @@
-import torch
 import yaml
+import torch
 
 import wandb
-from orion.utils.plot import initialize_classification_metrics, initialize_regression_metrics
 from orion.utils.video_training_and_eval import perform_inference
+from orion.utils.plot import initialize_classification_metrics, initialize_regression_metrics
 
 
 def run_inference_and_log_to_wandb(
@@ -81,28 +81,38 @@ def run_inference_and_no_logging(
 ):
     with open(config_path) as file:
         config = yaml.safe_load(file)
+    print(config)
+    # Update config with provided parameters, function parameters are prioritized over config values
+    if model_path is not None:
+        config["model_path"] = model_path
+    if data_path is not None:
+        config["data_filename"] = data_path
+    if output_dir is not None:
+        config["output_dir"] = output_dir
 
-    required_fields = ["model_path", "data_filename", "output_dir"]
-
-    missing_fields = [
-        field
-        for field in required_fields
-        if config.get(field) is None and locals().get(field) is None
-    ]
+    # Validate required fields after updates
+    missing_fields = []
+    if not config.get("model_path"):
+        missing_fields.append("model_path")
+    if not config.get("data_filename"):
+        missing_fields.append("data_filename")
+    if not config.get("output_dir"):
+        missing_fields.append("output_dir")
 
     if missing_fields:
-        raise ValueError(f"Missing required config fields: {', '.join(missing_fields)}")
+        raise ValueError(
+            f"Missing required fields: {', '.join(missing_fields)}. "
+            "Please provide them either in the config file or as function parameters:\n"
+            "- model_path: path to the model file\n"
+            "- data_filename: path to the data file (provided as data_path parameter)\n"
+            "- output_dir: directory for output files"
+        )
 
-    config["data_filename"] = config.get("data_filename", data_path)
-    config["model_path"] = config.get("model_path", model_path)
-    config["output_dir"] = config.get("output_dir", output_dir)
     config["debug"] = False
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Split: ", split)
+    print(f"Running {split} inference on device {device}")
 
-    df_predictions_inference = perform_inference(config=config, split=split, log_wandb=False)
-    return df_predictions_inference
+    return perform_inference(config=config, split=split, log_wandb=False)
 
 
 def run_inference(
