@@ -1,12 +1,12 @@
 # Training parameters
-num_epochs: !!int 10
+num_epochs: !!int 1
 model_name: !!str x3d_m
-data_filename: !!str /volume/orion_multi-class_multi-output/data/dev_set.csv
+data_filename: !!str data/ObjectRecon_SWIN3D_2016-2023_inference_predictions_with_df_metadata_and_report_1000.csv
+mean: [120.905205, 120.905205, 120.905205]
+std: [40.97189, 40.97189, 40.97189]
 output_dir: !!str "outputs"
 root: !!str "."
 datapoint_loc_label: !!str FileName
-# label_loc_label: [contrast_agent, main_structure, stent_presence]
-label_loc_label: [RV_Alteration]
 binary_threshold: !!float 0.5
 use_amp: !!bool True
 frames: !!int 72

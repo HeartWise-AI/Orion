@@ -5,8 +5,7 @@ data_filename: !!str /volume/orion_multi-class_multi-output/data/dev_set.csv
 output_dir: !!str "outputs"
 root: !!str "."
 datapoint_loc_label: !!str FileName
-# label_loc_label: [contrast_agent, main_structure, stent_presence]
-label_loc_label: [RV_Alteration]
+label_loc_label: [contrast_agent, main_structure, stent_presence]
 binary_threshold: !!float 0.5
 use_amp: !!bool True
 frames: !!int 72
@@ -29,21 +28,36 @@ task: !!str classification  # Indicates this is a multi-head classification mode
 
 # Label mappings
 labels_map:
-  RV_Alteration:
+  contrast_agent:
     "yes": !!int 1
     "no": !!int 0
+  main_structure:
+    Left Coronary: !!int 0
+    Right Coronary: !!int 1
+    Graft: !!int 2
+    Catheter: !!int 3
+    Femoral: !!int 4
+  stent_presence:
+    present: !!int 1
+    absent: !!int 0
 
 # Head structure configuration
 head_structure:
-  RV_Alteration: !!int 1
+  contrast_agent: !!int 1    # Binary classification (0 or 1)
+  main_structure: !!int 5    # Multi-class classification (5 classes)
+  stent_presence: !!int 1    # Binary classification (0 or 1)
 
 # Loss structure configuration
 loss_structure:
-  RV_Alteration: !!str bce_logit
+  contrast_agent: !!str bce_logit
+  main_structure: !!str ce
+  stent_presence: !!str bce_logit
 
 # Head weights configuration
 head_weights:
-  RV_Alteration: !!float 1.0
+  contrast_agent: !!float 1.0
+  main_structure: !!float 1.0
+  stent_presence: !!float 1.0
 
 # Scheduler configuration
 scheduler_type: !!str step
