@@ -1,0 +1,77 @@
+# Training parameters
+num_epochs: !!int 10
+model_name: !!str x3d_m
+data_filename: !!str /volume/orion_multi-class_multi-output/data/dev_set.csv
+output_dir: !!str "outputs"
+root: !!str "."
+datapoint_loc_label: !!str FileName
+label_loc_label: [RV_Alteration]
+binary_threshold: !!float 0.5
+use_amp: !!bool True
+frames: !!int 72
+device: !!str cuda
+period: !!int 2
+pretrained: !!bool True
+seed: !!int 0
+optimizer: !!str SGD
+weight_decay: !!float 0.00000049811877376642
+num_workers: !!int 8
+batch_size: !!int 4
+lr: !!float 0.0007008364943470314
+label_smoothing: !!null null
+label_smoothing_value: !!null null
+class_weights: !!null null
+
+# Loss and task configuration
+loss: !!str multi_head  # Use multi-head loss for multiple classification tasks
+task: !!str classification  # Indicates this is a multi-head classification model
+
+# Label mappings
+labels_map:
+  RV_Alteration:
+    "yes": !!int 1
+    "no": !!int 0
+
+# Head structure configuration
+head_structure:
+  RV_Alteration: !!int 1
+
+# Loss structure configuration
+loss_structure:
+  RV_Alteration: !!str bce_logit
+
+# Head weights configuration
+head_weights:
+  RV_Alteration: !!float 1.0
+
+# Scheduler configuration
+scheduler_type: !!str step
+factor: !!float 0.3
+patience: !!int 7
+threshold: !!float 0.01
+lr_step_period: !!int 15
+run_test: !!bool true
+tag: !!str filtered_deepRV_multihead_72_16_0.007
+project: !!str test_multi_head_classification
+entity: !!str mhi_ai
+resume: !!bool false 
+rand_augment: !!bool true
+resize: !!int 256
+apply_mask: !!bool false
+view_count: !!null null
+save_best: !!str loss
+
+# Wandb
+early_terminate:
+  type: !!str hyperband
+  min_iter: !!int 3
+
+# Metrics control
+metrics_control:
+  optim_thresh: !!str g_mean
+  plot_pred_distribution: !!bool true
+  plot_metrics_moving_thresh: !!bool true
+  n_bootstrap: !!int 100
+  q_bootstrap: !!float 0.05
+
+transforms: !!null null

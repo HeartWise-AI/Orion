@@ -20,7 +20,7 @@ Orion is a Python-based application designed for video training and evaluation t
 
 ## Usage
 
-You can use Orion either through a Python script or directly in a Jupyter notebook.
+You can use Orion either through a Python script or build your own Jupyter notebook inspired by code samples in the `notebooks/` folder.
 
 ### Configuration file example
 
@@ -61,7 +61,7 @@ When configuring your model in the YAML file, ensure that the `frames` and `resi
 
 1. Prepare your configuration file in YAML format.
 
-1. Run the main script with torchrun:
+2. Run the main script with torchrun:
 
    ```bash
    torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
@@ -72,14 +72,27 @@ When configuring your model in the YAML file, ensure that the `frames` and `resi
 ### Using a Jupyter Notebook
 
 1. Prepare your configuration file in YAML format.
-1. In your Jupyter notebook, import necessary modules and set up environment variables.
-1. Define a class for your command-line arguments.
-1. Load your configuration, create transforms, initialize a wandb run, and run the main process.
+2. In your Jupyter notebook, import necessary modules and set up environment variables.
+3. Define a class for your command-line arguments.
+4. Load your configuration, create transforms, initialize a wandb run, and run the main process.
 
 ### Using Weights & Biases Sweeps
 
 1. Prepare your configuration and sweep configuration files in YAML format.
-1. In your Jupyter notebook, import necessary modules, define a function to load YAML configurations, and run the sweep agent.
+2. Run the `run_sweep.py` script to start the sweep agent (no argument needed - update the `sweep_conf_file_path` variable in the script to point to your sweep configuration file).
+   ```bash
+   python run_sweep.py
+   ```
+
+### Inference and Evaluation
+
+To run inference and evaluation, use the `run_inference.py` script.
+
+```bash
+python run_inference.py --config_path notebooks/config/config_x3d_multi_output_classification_eval.yaml --splits inference --model_path outputs/outputs_folder_id/best.pt
+```
+
+The other arguments are optional: the data path (usually defined in the config file), the output directory (usually defined in the config file), the wandb id & resume flag (both not needed for inference).
 
 ### Note
 
