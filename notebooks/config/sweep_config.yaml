@@ -1,5 +1,5 @@
 program:
-  ../orion/utils/video_training_and_eval.py
+  orion/utils/video_training_and_eval.py
 name: "1_CathEF_UCSF_MHI_2021_Retrain_15_fps_ddp"
 method: "bayes" # grid, random
 metric:
@@ -30,7 +30,7 @@ early_terminate:
   type: hyperband
   min_iter: 3    
 command:
-  - /volume/Orion/notebooks/config/runner.sh
+  - notebooks/config/runner.sh
   - ${program}
-  - "config/config_regression_swin3d.yaml"
+  - "notebooks/config/config_x3d_multi_output_classification_train.yaml"
   - ${args}
