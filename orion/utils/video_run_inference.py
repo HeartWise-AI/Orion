@@ -82,8 +82,13 @@ def run_inference_and_no_logging(
     with open(config_path) as file:
         config = yaml.safe_load(file)
 
-    required_fields = ["model_path", "data_filename", "output_dir"]
+    # Update config with provided arguments first
+    config["data_filename"] = config.get("data_filename", data_path)
+    config["model_path"] = config.get("model_path", model_path)
+    config["output_dir"] = config.get("output_dir", output_dir)
 
+    # Check for missing fields
+    required_fields = ["model_path", "data_filename", "output_dir"]
     missing_fields = [
         field
         for field in required_fields
@@ -93,13 +98,9 @@ def run_inference_and_no_logging(
     if missing_fields:
         raise ValueError(f"Missing required config fields: {', '.join(missing_fields)}")
 
-    config["data_filename"] = config.get("data_filename", data_path)
-    config["model_path"] = config.get("model_path", model_path)
-    config["output_dir"] = config.get("output_dir", output_dir)
     config["debug"] = False
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Split: ", split)
+    print(f"Split: {split} Device: {device}")
 
     df_predictions_inference = perform_inference(config=config, split=split, log_wandb=False)
     return df_predictions_inference
