@@ -1,9 +1,9 @@
-import torch
 import yaml
+import torch
 
 import wandb
-from orion.utils.plot import initialize_classification_metrics, initialize_regression_metrics
 from orion.utils.video_training_and_eval import perform_inference
+from orion.utils.plot import initialize_classification_metrics, initialize_regression_metrics
 
 
 def run_inference_and_log_to_wandb(
@@ -96,14 +96,19 @@ def run_inference_and_no_logging(
     ]
 
     if missing_fields:
-        raise ValueError(f"Missing required config fields: {', '.join(missing_fields)}")
+        raise ValueError(
+            f"Missing required fields: {', '.join(missing_fields)}. "
+            "Please provide them either in the config file or as function parameters:\n"
+            "- model_path: path to the model file\n"
+            "- data_filename: path to the data file (provided as data_path parameter)\n"
+            "- output_dir: directory for output files"
+        )
 
     config["debug"] = False
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Split: {split} Device: {device}")
+    print(f"Running {split} inference on device {device}")
 
-    df_predictions_inference = perform_inference(config=config, split=split, log_wandb=False)
-    return df_predictions_inference
+    return perform_inference(config=config, split=split, log_wandb=False)
 
 
 def run_inference(
