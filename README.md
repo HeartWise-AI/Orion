@@ -6,7 +6,14 @@ Orion is a Python-based application designed for video training and evaluation t
 
 1. Ensure you have Python 3.10 or later installed.
 
-2. Create a new environment and install the dependencies using uv.
+2. Clone the repository and navigate to the root directory.
+
+```bash
+git clone https://github.com/HeartWise-AI/Orion.git
+cd Orion
+```
+
+3. Create a new environment and install the dependencies using uv.
 
    ```bash
    python -m venv orion-venv
@@ -16,11 +23,17 @@ Orion is a Python-based application designed for video training and evaluation t
    uv pip install -r requirements.txt
    ```
 
-3. Ensure you have an account on wandb.ai and that you've logged in using `wandb login`
+4. Ensure you have an account on wandb.ai and that you've logged in using `wandb login`
 
 ## Usage
 
-You can use Orion either through a Python script or build your own Jupyter notebook inspired by code samples in the `notebooks/` folder.
+You can use Orion either through a Python script 
+```bash
+python run_sweep.py
+python run_inference.py
+```
+
+or build your own Jupyter notebook inspired by code samples in the `notebooks/` folder.
 
 ### Configuration file example
 
