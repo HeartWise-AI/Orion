@@ -2,19 +2,17 @@ import os
 import pathlib
 import sys
 import time
-from itertools import cycle
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
-import torchmetrics
 import torchvision.transforms as transforms
 
 import wandb
+
+from typing import List, Dict, Optional
 
 # Add the parent directory of 'orion' to the Python path
 dir2 = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -946,9 +944,10 @@ def load_dataset(split, config, transforms, weighted_sampling):
     if missing_fields:
         raise ValueError(f"Error: The following fields are missing: {', '.join(missing_fields)}")
     else:
-        target_label = config.get("label_loc_label", None)
+        target_label: List[str] = config.get("label_loc_label", None)
+        head_structure: Optional[Dict[str, int]] = config.get("head_structure", None)
         if config["task"] == "classification":
-            if config.get("head_structure", None) != target_label and split == "train":
+            if list(head_structure.keys()) != target_label and split == "train":
                 raise ValueError("Error: head_structure does not match target_label")
             
         kwargs = {
