@@ -879,7 +879,6 @@ def build_model(config, device, model_path=None, for_inference=False):
                     raise ValueError(f"Unexpected label {int_label} for binary classification.")
                 labels_map[int(int_label)] = label
 
-        print("Labels map before sorting:", labels_map)
         if len(labels_map) > 2 and config["num_classes"] != len(labels_map):
             raise ValueError(
                 f"Error: The number of classes specified in the config ({config['num_classes']}) does not match the number of unique labels ({len(labels_map)})."
@@ -887,8 +886,6 @@ def build_model(config, device, model_path=None, for_inference=False):
 
         # Optionally, sort the labels_map if needed
         labels_map = dict(sorted(labels_map.items(), key=lambda item: item[0]))
-
-        print("Labels map after sorting:", labels_map)
 
     else:
         labels_map = None
