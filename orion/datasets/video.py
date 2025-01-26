@@ -272,7 +272,6 @@ class Video(torch.utils.data.Dataset):
         if self.max_length is not None:
             # Shorten videos to max_length
             length = min(length, self.max_length)
-
         if f < length * self.period:
             # Pad video with frames filled with zeros if too short
             # 0 represents the mean color (dark grey), since this is after normalization
@@ -336,7 +335,9 @@ class Video(torch.utils.data.Dataset):
                         target = self.target_transform(target)
 
         # Select random clips
-        video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in start)
+        frames_needed = length * self.period
+        start = np.random.randint(0, f - frames_needed + 1)
+        video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in [start])
         video = video[0] if self.clips == 1 else np.stack(video)
         if self.pad is not None:
             # Add padding of zeros (mean color of videos)
@@ -399,6 +400,7 @@ def format_mean_std(input_value):
     """
     Formats the mean or std value to a list of floats with length=3.
     """
+
     if input_value is 1.0 or input_value is 0.0:
         print("Mean/STD value is not defined or is trivial.")
         return input_value
@@ -429,6 +431,8 @@ def format_mean_std(input_value):
 
     if len(formatted_value) != 3:
         raise ValueError("Mean/std must have exactly three elements (for RGB channels).")
+
+    return formatted_value
 
 
 class Video_Multi(torch.utils.data.Dataset):

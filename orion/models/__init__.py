@@ -281,6 +281,7 @@ def load_and_modify_model(config):
     resize = config.get("resize", 256)
     num_frames = config.get("frames", 64)
     print(f"model_name: {config['model_name']}")
+
     if config["model_name"] == "x3d_multi":
         model = x3d_multi(num_classes, **config)
     elif config["model_name"] == "timesformer":
@@ -314,7 +315,6 @@ def load_and_modify_model(config):
                 weights="KINETICS400_V1"
             )
         else:
-            print(config["model_name"])
             logging.basicConfig(level=logging.DEBUG)
             model = torch.hub.load(
                 "facebookresearch/pytorchvideo", config["model_name"], pretrained=True

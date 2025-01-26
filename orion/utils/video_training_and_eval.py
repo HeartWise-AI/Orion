@@ -75,22 +75,6 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     Returns:
         None
     """
-    torch.cuda.empty_cache()
-    # Check to see if local_rank is 0
-    is_master = args.local_rank == 0
-    print("is_master", is_master)
-
-    config = setup_config(config_defaults, transforms, is_master, run=run)
-    use_amp = config.get("use_amp", False)
-    print("Using AMP", use_amp)
-    task = config.get("task", "regression")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-
-    np.random.seed(config["seed"])
-    torch.manual_seed(config["seed"])
-
-    do_log = run is not None  # Run is none if process rank is not 0
-
     # set the device
     total_devices = torch.cuda.device_count()
     if total_devices == 0:
@@ -104,6 +88,22 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     is_main_process = dist.get_rank() == 0
     print("is main process", is_main_process)
     torch.cuda.set_device(device)
+
+    torch.cuda.empty_cache()
+    # Check to see if local_rank is 0
+    is_master = args.local_rank == 0
+    print("is_master", is_master)
+
+    config = setup_config(config_defaults, transforms, is_master, run=run, device=device)
+    use_amp = config.get("use_amp", False)
+    print("Using AMP", use_amp)
+    task = config.get("task", "regression")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    np.random.seed(config["seed"])
+    torch.manual_seed(config["seed"])
+
+    do_log = run is not None  # Run is none if process rank is not 0
 
     # Use model_path from config, or default to config["output_dir"] if model_path is None
     model_path = config.get("model_path") or config.get("output_dir")
@@ -299,33 +299,36 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
             wandb.finish()
 
 
-def setup_config(config, transforms, is_master, run):
+def setup_config(config, transforms, is_master, run, device):
     """
     Sets up the configuration settings for training or evaluation.
 
     Args:
         config (dict): The initial configuration settings.
-        transforms: The transforms to be applied to the data.
-        is_master: A boolean indicating if the current process is the master process.
+        transforms (list): The transforms to be applied to the data.
+        is_master (bool): True if local_rank == 0, but note that on multi-node
+                          setups it's safer to compare dist.get_rank() == 0.
+        run (wandb.Run): The W&B run object (only valid if is_master).
+        device: The current device (torch.device).
 
     Returns:
         config (dict): The updated configuration settings.
-
-    Examples:
-        >>> config = {'output_duir': None, 'debug': False, 'test_time_augmentation': False}
-        >>> transforms = [Resize(), Normalize()]
-        >>> is_master = True
-        >>> updated_config = setup_config(config, transforms, is_master)
     """
+    # Get global rank, so we know which is truly rank 0 in multi-node setups
+    dist_rank = dist.get_rank()
+    world_size = dist.get_world_size()
 
+    # Set basic config flags
     config["transforms"] = transforms
     config["debug"] = config.get("debug", False)
     config["test_time_augmentation"] = config.get("test_time_augmentation", False)
     config["weighted_sampling"] = config.get("weighted_sampling", False)
     config["binary_threhsold"] = config.get("binary_threshold", 0.5)
 
-    # Define device
-    if is_master:
+    # ---------------------------
+    # 1) Rank 0 sets up W&B dir
+    # ---------------------------
+    if dist_rank == 0:
         run_id = wandb.run.id
         print("Run id", run_id)
         config["run_id"] = run_id
@@ -335,100 +338,148 @@ def setup_config(config, transforms, is_master, run):
             config["output_dir"] = os.path.join(config["output_dir"], generated_output_dir)
         else:
             config["output_dir"] = generated_output_dir
+
         pathlib.Path(config["output_dir"]).mkdir(parents=True, exist_ok=True)
+
+        # Also update wandb.config so rank 0 logs the final settings
         wandb.config.update(config, allow_val_change=True)
-        print("output_folder created", config["output_dir"])
-    if config["view_count"] is None:
-        print("Loading with 1 view count for mean and std")
+        print("[Rank 0] output_folder created:", config["output_dir"])
+
+    # Ensure that all ranks wait until rank 0 finishes directory creation
+    dist.barrier()
+
+    # ---------------------------
+    # 2) Possibly compute mean/std on rank 0
+    # ---------------------------
+    multi_view_mode = config["view_count"] is not None and config["view_count"] > 1
+
+    if not multi_view_mode:
+        print(f"Loading with 1 view count for mean and std on rank={dist_rank}")
         if (
             ("mean" not in config)
             or ("std" not in config)
             or (config["mean"] is None)
             or (config["std"] is None)
         ):
-            target_label = config.get("target_label", None)
-            if config["task"] == "classification":
-                target_label = config.get("head_structure", None)
+            if dist_rank == 0:
+                target_label = config.get("target_label", None)
+                if config["task"] == "classification":
+                    target_label = config.get("head_structure", None)
 
-            ## Load a dataset for normalization
-            mean, std = orion.utils.get_mean_and_std(
-                orion.datasets.Video(
-                    root=config["root"],
-                    split="train",
-                    target_label=target_label,
-                    data_filename=config["data_filename"],
-                    datapoint_loc_label=config["datapoint_loc_label"],
-                    video_transforms=None,
-                    resize=config["resize"],
-                    weighted_sampling=False,
-                    normalize=False,
-                    length=config["frames"],
-                ),
-                batch_size=config["batch_size"],
-                num_workers=config["num_workers"],
-            )
-            print("Mean", mean)
-            print("Std", std)
-
-            config["mean"] = mean
-            config["std"] = std
-            if is_master:
-                wandb.config.update(
-                    {
-                        "mean": config["mean"],
-                        "std": config["std"],
-                        "output_dir": config["output_dir"],
-                    },
-                    allow_val_change=True,
+                # Only rank 0 loads the dataset & computes
+                print("[Rank 0] computing mean/std for single-view ...")
+                mean, std = orion.utils.get_mean_and_std(
+                    orion.datasets.Video(
+                        root=config["root"],
+                        split="train",
+                        target_label=target_label,
+                        data_filename=config["data_filename"],
+                        datapoint_loc_label=config["datapoint_loc_label"],
+                        video_transforms=None,
+                        resize=config["resize"],
+                        weighted_sampling=False,
+                        normalize=False,
+                        length=config["frames"],
+                    ),
+                    batch_size=config["batch_size"],
+                    num_workers=config["num_workers"],
                 )
+                config["mean"] = mean
+                config["std"] = std
+                print(f"[Rank 0] Computed mean={mean}, std={std}")
+            else:
+                # Other ranks get placeholders for now
+                config["mean"] = None
+                config["std"] = None
         else:
-            print("Using mean and std from config", config["mean"], config["std"])
+            print(
+                f"[Rank {dist_rank}] Using mean/std from config:", config["mean"], config["std"]
+            )
     else:
-        print(f"Loading with {config['view_count']} view count for mean and std")
+        print(
+            f"MULTI_VIDEO: Loading with {config['view_count']} view count for mean and std (rank={dist_rank})"
+        )
         if (
             ("mean" not in config)
             or ("std" not in config)
             or (config["mean"] is None)
             or (config["std"] is None)
         ):
-            target_label = config.get("target_label", None)
-            if config["task"] == "classification":
-                target_label = config.get("head_structure", None)
-            ## Load a dataset for normalization
-            mean, std = orion.utils.multi_get_mean_and_std(
-                orion.datasets.Video_Multi(
-                    root=config["root"],
-                    split="train",
-                    target_label=target_label,
-                    data_filename=config["data_filename"],
-                    datapoint_loc_label=config["datapoint_loc_label"],
-                    video_transforms=None,
-                    resize=config["resize"],
-                    weighted_sampling=False,
-                    normalize=False,
-                    debug=False,
-                    view_count=config["view_count"],
-                    length=config["frames"],
-                    labels_map=config.get("labels_map", None),
-                ),
-                batch_size=config["batch_size"],
-                num_workers=config["num_workers"],
+            if dist_rank == 0:
+                target_label = config.get("target_label", None)
+                if config["task"] == "classification":
+                    target_label = config.get("head_structure", None)
+
+                # Only rank 0 loads multi-view dataset & computes
+                print("[Rank 0] computing mean/std for multi-view ...")
+                mean, std = orion.utils.multi_get_mean_and_std(
+                    orion.datasets.Video_Multi(
+                        root=config["root"],
+                        split="train",
+                        target_label=target_label,
+                        data_filename=config["data_filename"],
+                        datapoint_loc_label=config["datapoint_loc_label"],
+                        video_transforms=None,
+                        resize=config["resize"],
+                        weighted_sampling=False,
+                        normalize=False,
+                        debug=False,
+                        view_count=config["view_count"],
+                        length=config["frames"],
+                        labels_map=config.get("labels_map", None),
+                    ),
+                    batch_size=config["batch_size"],
+                    num_workers=config["num_workers"],
+                )
+                config["mean"] = mean
+                config["std"] = std
+                print(f"[Rank 0] Computed multi-view mean={mean}, std={std}")
+            else:
+                # Other ranks get placeholders for now
+                config["mean"] = None
+                config["std"] = None
+        else:
+            print(
+                f"[Rank {dist_rank}] Using pre-existing mean/std:", config["mean"], config["std"]
             )
 
-            config["mean"] = mean
-            config["std"] = std
-            if is_master:
-                wandb.config.update(
-                    {
-                        "mean": config["mean"],
-                        "std": config["std"],
-                        "output_dir": config["output_dir"],
-                    },
-                    allow_val_change=True,
-                )
-        else:
-            print("Using mean and std from config", config["mean"], config["std"])
+    # Wait so rank 0 definitely finishes computing mean/std
+    dist.barrier()
 
+    # ---------------------------
+    # 3) Broadcast the final mean/std to all ranks
+    # ---------------------------
+    # Convert Python lists to Tensors for broadcast
+    if dist_rank == 0:
+        local_mean = torch.tensor(config["mean"], device=device, dtype=torch.float32)
+        local_std = torch.tensor(config["std"], device=device, dtype=torch.float32)
+    else:
+        # On other ranks, shape-match rank 0
+        local_mean = torch.zeros(3, device=device, dtype=torch.float32)
+        local_std = torch.zeros(3, device=device, dtype=torch.float32)
+
+    dist.broadcast(local_mean, src=0)
+    dist.broadcast(local_std, src=0)
+
+    # Convert back to Python lists
+    config["mean"] = local_mean.cpu().tolist()
+    config["std"] = local_std.cpu().tolist()
+
+    # Optional barrier again to ensure all have assigned config["mean"] and config["std"]
+    dist.barrier()
+
+    if dist_rank == 0:
+        # Update wandb config with final values
+        wandb.config.update(
+            {
+                "mean": config["mean"],
+                "std": config["std"],
+            },
+            allow_val_change=True,
+        )
+        print("[Rank 0] Final mean/std broadcast complete.")
+
+    print(f"[Rank {dist_rank}] => Final mean={config['mean']}, std={config['std']}")
     return config
 
 
@@ -517,6 +568,7 @@ def run_training_or_evaluate_orchestrator(
         metrics=metrics,
         config=config,
     )
+    print("Filenames:", filenames)
     y = np.array(targets)
     yhat = np.array(predictions)
 
@@ -912,6 +964,7 @@ def load_dataset(split, config, transforms, weighted_sampling):
         missing_fields.append("mean")
     if config["std"] is None:
         missing_fields.append("std")
+
     if missing_fields:
         raise ValueError(f"Error: The following fields are missing: {', '.join(missing_fields)}")
     else:
@@ -935,7 +988,7 @@ def load_dataset(split, config, transforms, weighted_sampling):
         }
 
     if split != "inference":
-        if config["view_count"] is None:
+        if config["view_count"] is None or config["view_count"] == 1:
             dataset = orion.datasets.Video(
                 split=split,
                 video_transforms=transforms,
@@ -1210,7 +1263,7 @@ def train_or_evaluate_epoch(
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
             for batch_idx, (data, outcomes, fnames) in enumerate(dataloader, 1):
                 # If multi-view, shape => list of length B, each item => list of Tensors
-                if config["view_count"] is not None:
+                if config["view_count"] is not None and config["view_count"] > 1:
                     data = torch.stack(data, dim=1)  # [Batch, Views, T, C, H, W]
 
                     data = data.permute(0, 1, 3, 2, 4, 5)  # [Batch, Views, C, T, H, W]
@@ -1243,8 +1296,12 @@ def train_or_evaluate_epoch(
                             if isinstance(outcomes, torch.Tensor)
                             else outcomes
                         )
+                    paired_fnames = list(zip(fnames[0], fnames[1]))
+                    filenames.extend(paired_fnames)
                 else:
-                    data = torch.stack(data, dim=1)
+                    # Handle single view data
+
+                    # data is already a tensor of shape [B,C,T,H,W], no need to stack
                     data = data.to(device)
 
                     # Handle outcomes based on whether it's a dictionary
@@ -1258,14 +1315,8 @@ def train_or_evaluate_epoch(
                         outcomes = {target_label[0]: outcomes.to(device)}
 
                     if config["model_name"] in ["timesformer", "stam"]:
-                        data = data.permute(0, 1, 3, 2, 4, 5)
-
-                if isinstance(fnames, list) and len(fnames) >= 2:
-                    # Zip them together => 10 items, each is a tuple of 2 filenames
-                    paired_fnames = list(zip(fnames[0], fnames[1]))
-                    filenames.extend(paired_fnames)
-                else:
-                    # Otherwise extend as before (in case it's already one item per sample)
+                        # Add dummy view dimension for consistency
+                        data = data.unsqueeze(1)
                     filenames.extend(fnames)
 
                 if config.get("block_size") is not None and len(data.shape) == 5:
@@ -1280,8 +1331,6 @@ def train_or_evaluate_epoch(
                     if not isinstance(outputs, dict):
                         target_label = config.get("target_label", "main")
                         outputs = {target_label: outputs}
-                        print("outputs: ", len(outputs))
-
                     # Now returns a dictionnary of losses {"main_loss": main_loss, "loss_1": loss_1, "loss_2": loss_2, ...}
                     losses = compute_loss_and_update_metrics(
                         outputs,
@@ -1631,7 +1680,7 @@ def format_dataframe_predictions(filenames, predictions, task, config, labels_ma
                 )
             # e.g. add probabilities
             df_predictions[f"pred_{head_name}"] = pred_array
-            print(df_predictions)
+
             # Possibly add predicted class
             num_classes = head_structure[head_name]
             if num_classes <= 2:
@@ -1690,8 +1739,10 @@ def save_predictions_to_csv(df_predictions, config, split, epoch):
     print(f"Saving predictions to {output_path}")
     df_predictions.to_csv(output_path)
 
-    print(f"Saving best predictions to {best_output_path}")
-    df_predictions.to_csv(best_output_path)
+    # Only save best predictions if not in inference mode
+    if epoch != "inference":
+        print(f"Saving best predictions to {best_output_path}")
+        df_predictions.to_csv(best_output_path)
 
 
 def create_transforms(config):
