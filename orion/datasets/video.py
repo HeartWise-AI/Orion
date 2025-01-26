@@ -81,7 +81,7 @@ class Video(torch.utils.data.Dataset):
         self.filename = data_filename
         self.datapoint_loc_label = datapoint_loc_label
         self.split = split
-        
+
         # Handle target labels for multi-head case
         if isinstance(target_label, str):
             self.target_label = [target_label]
@@ -92,7 +92,7 @@ class Video(torch.utils.data.Dataset):
             self.target_label = target_label
         else:
             self.target_label = None
-            
+
         self.mean = format_mean_std(mean)
         self.std = format_mean_std(std)
         self.length = length
@@ -122,7 +122,9 @@ class Video(torch.utils.data.Dataset):
                         "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
                     )
 
-            self.fnames, self.outcomes, self.target_indices = self.load_data(split, self.target_label)
+            self.fnames, self.outcomes, self.target_indices = self.load_data(
+                split, self.target_label
+            )
             self.frames = collections.defaultdict(list)
             self.trace = collections.defaultdict(_defaultdict_of_lists)
 
@@ -144,11 +146,11 @@ class Video(torch.utils.data.Dataset):
     def load_data(self, split, target_labels):
         """
         Load data from the CSV file and extract filenames and outcomes.
-        
+
         Args:
             split (str): Dataset split ('train', 'val', 'test', 'all')
             target_labels (list): List of target label column names
-            
+
         Returns:
             tuple: (filenames, outcomes, target_indices)
         """
@@ -158,7 +160,7 @@ class Video(torch.utils.data.Dataset):
 
         filename_index = data.columns.get_loc(self.datapoint_loc_label)
         split_index = data.columns.get_loc("Split")
-        
+
         # Handle target indices for multi-head case
         if target_labels is None:
             target_indices = None
@@ -192,12 +194,7 @@ class Video(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         # Find filename of video
-        if self.split == "external_test":
-            video_fname = os.path.join(self.external_test_location, self.fnames[index])
-        elif self.split == "clinical_test":
-            video_fname = os.path.join(self.folder, "ProcessedStrainStudyA4c", self.fnames[index])
-        else:
-            video_fname = self.fnames[index]
+        video_fname = self.fnames[index]
 
         video = orion.utils.loadvideo(video_fname).astype(np.float32)
 
@@ -284,20 +281,16 @@ class Video(torch.utils.data.Dataset):
             )
             c, f, h, w = video.shape  # pylint: disable=E0633
 
-        if self.clips == "all":
-            # Take all possible clips of desired length
-            start = np.arange(f - (length - 1) * self.period)
-        else:
-            # Take random clips from video
-            start = np.random.choice(f - (length - 1) * self.period, self.clips)
-
         if self.target_label is not None:
             # Handle multi-head case
             if isinstance(self.outcome[index], dict):
                 # For multi-head, return the dictionary of targets
                 target = self.outcome[index]
                 if self.target_transform is not None:
-                    target = {k: self.target_transform(torch.tensor(v).float()) for k, v in target.items()}
+                    target = {
+                        k: self.target_transform(torch.tensor(v).float())
+                        for k, v in target.items()
+                    }
             else:
                 # Original single-head logic with all special cases
                 target = []
@@ -375,52 +368,77 @@ def _defaultdict_of_lists():
     return collections.defaultdict(list)
 
 
+import collections
+import os
+import pathlib
+import sys
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.utils.data
+import torchvision
+from torchvision.transforms import v2
+
+# Global variable for directory paths
+dir2 = os.path.abspath("/volume/Orion/orion")
+dir1 = os.path.dirname(dir2)
+if dir1 not in sys.path:
+    sys.path.append(dir1)
+
+import orion
+
+
+def _defaultdict_of_lists():
+    """Returns a defaultdict of lists.
+    Used to avoid issues with Windows if anonymous."""
+    return collections.defaultdict(list)
+
+
+def format_mean_std(input_value):
+    """
+    Formats the mean or std value to a list of floats with length=3.
+    """
+    if input_value is 1.0 or input_value is 0.0:
+        print("Mean/STD value is not defined or is trivial.")
+        return input_value
+
+    # If it's a single-element list containing a string, unwrap it.
+    if (
+        isinstance(input_value, list)
+        and len(input_value) == 1
+        and isinstance(input_value[0], str)
+    ):
+        input_value = input_value[0]
+
+    if isinstance(input_value, str):
+        cleaned_input = (
+            input_value.replace("[", "").replace("]", "").strip().replace("’", "").split()
+        )
+        try:
+            formatted_value = [float(val) for val in cleaned_input]
+        except ValueError:
+            raise ValueError("String input for mean/std must be space-separated numbers.")
+    elif isinstance(input_value, (list, np.ndarray)):
+        try:
+            formatted_value = [float(val) for val in input_value]
+        except ValueError:
+            raise ValueError("List or array input for mean/std must contain numbers.")
+    else:
+        raise TypeError("Input for mean/std must be a string, list, or numpy array.")
+
+    if len(formatted_value) != 3:
+        raise ValueError("Mean/std must have exactly three elements (for RGB channels).")
+
+
 class Video_Multi(torch.utils.data.Dataset):
-    """orion Dataset.
-    Args:
-        root (string): Root directory of dataset (defaults to `orion.config.DATA_DIR`)
-        split (string): One of {"train", "val", "test", "external_test"}
-        target_label (string or list, optional): Type of target to use,
-            ``Filename'', ``EF'', ``EDV'', ``ESV'', ``LargeIndex'',
-            ``SmallIndex'', ``LargeFrame'', ``SmallFrame'', ``LargeTrace'',
-            or ``SmallTrace''
-            Can also be a list to output a tuple with all specified target types.
-            The targets represent:
-                ``Filename'' (string): filename of video
-                ``EF'' (float): ejection fraction
-                ``EDV'' (float): end-diastolic volume
-                ``ESV'' (float): end-systolic volume
-                ``LargeIndex'' (int): index of large (diastolic) frame in video
-                ``SmallIndex'' (int): index of small (systolic) frame in video
-                ``LargeFrame'' (np.array shape=(3, height, width)): normalized large (diastolic) frame
-                ``SmallFrame'' (np.array shape=(3, height, width)): normalized small (systolic) frame
-                ``LargeTrace'' (np.array shape=(height, width)): left ventricle large (diastolic) segmentation
-                    value of 0 indicates pixel is outside left ventricle
-                             1 indicates pixel is inside left ventricle
-                ``SmallTrace'' (np.array shape=(height, width)): left ventricle small (systolic) segmentation
-                    value of 0 indicates pixel is outside left ventricle
-                             1 indicates pixel is inside left ventricle
-            Defaults to ``EF''.
-        mean (int, float, or np.array shape=(3,), optional): means for all (if scalar) or each (if np.array) channel.
-            Used for normalizing the video. Defaults to 0 (video is not shifted).
-        std (int, float, or np.array shape=(3,), optional): standard deviation for all (if scalar) or each (if np.array) channel.
-            Used for normalizing the video. Defaults to 0 (video is not scaled).
-        length (int or None, optional): Number of frames to clip from video. If ``None'', longest possible clip is returned.
-            Defaults to 16.
-        period (int, optional): Sampling period for taking a clip from the video (i.e. every ``period''-th frame is taken)
-            Defaults to 2.
-        max_length (int or None, optional): Maximum number of frames to clip from video (main use is for shortening excessively
-            long videos when ``length'' is set to None). If ``None'', shortening is not applied to any video.
-            Defaults to 250.
-        clips (int, optional): Number of clips to sample. Main use is for test-time augmentation with random clips.
-            Defaults to 1.
-        pad (int or None, optional): Number of pixels to pad all frames on each side (used as augmentation).
-            and a window of the original size is taken. If ``None'', no padding occurs.
-            Defaults to ``None''.
-        noise (float or None, optional): Fraction of pixels to black out as simulated noise. If ``None'', no simulated noise is added.
-            Defaults to ``None''.
-        target_transform (callable, optional): A function/transform that takes in the target and transforms it.
-        external_test_location (string): Path to videos to use for external testing.
+    """
+    A multi-view video dataset class that supports single or multi targets.
+    It can convert string labels (like "Normal") to numeric if 'labels_map'
+    is provided in the config.
+
+    Returns:
+      (list_of_view_tensors, dict_of_label_tensors, file_list).
     """
 
     def __init__(
@@ -428,7 +446,7 @@ class Video_Multi(torch.utils.data.Dataset):
         root="../../data/",
         data_filename=None,
         split="train",
-        target_label="HCM",
+        target_label=None,  # e.g. "y_true_cat_label" or a dict
         datapoint_loc_label="FileName",
         resize=224,
         view_count=2,
@@ -449,19 +467,20 @@ class Video_Multi(torch.utils.data.Dataset):
         weighted_sampling=False,
         debug=False,
         normalize=True,
-    ) -> None:
-        self.folder = pathlib.Path(root)
+        labels_map=None,
+    ):
+        super().__init__()
+        self.root = pathlib.Path(root)
         self.filename = data_filename
-        self.datapoint_loc_label = datapoint_loc_label
         self.split = split
-        # if not isinstance(target_label, list):
-        #     target_label = [target_label]
-        self.target_label = target_label
+        self.datapoint_loc_label = datapoint_loc_label
+        self.view_count = view_count
+        self.resize = resize
         self.mean = format_mean_std(mean)
         self.std = format_mean_std(std)
         self.length = length
-        self.max_length = max_length
         self.period = period
+        self.max_length = max_length
         self.clips = clips
         self.pad = pad
         self.noise = noise
@@ -470,240 +489,198 @@ class Video_Multi(torch.utils.data.Dataset):
         self.rand_augment = rand_augment
         self.target_transform = target_transform
         self.external_test_location = external_test_location
-        self.resize = resize
-        self.view_count = view_count
-        self.debug = debug
         self.weighted_sampling = weighted_sampling
+        self.debug = debug
         self.normalize = normalize
 
-        self.fnames, self.outcome = [], []
+        # We'll store labels_map so we can look up any string -> numeric
+        # For example:
+        # labels_map = {
+        #    "y_true_cat_label": {
+        #        "Normal": 0,
+        #        "Physiology abnormal": 1
+        #    }
+        # }
+        self.labels_map = labels_map or {}
 
-        df_dataset = pd.read_csv(
-            os.path.join(self.folder, self.filename), sep="α", engine="python"
-        )
+        # --- Parse target_label -> self.target_label_list
+        if isinstance(target_label, str):
+            self.target_label_list = [target_label]
+        elif isinstance(target_label, dict):
+            self.target_label_list = list(target_label.keys())
+        elif isinstance(target_label, list):
+            self.target_label_list = target_label
+        else:
+            self.target_label_list = []
 
-        filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
+        # Read CSV with "α" delimiter
+        df_dataset = pd.read_csv(self.root / self.filename, sep="α", engine="python")
+
+        # Build a dictionary of column indices for each label
+        self.target_indices = {}
+        for lbl in self.target_label_list:
+            if lbl in df_dataset.columns:
+                self.target_indices[lbl] = df_dataset.columns.get_loc(lbl)
+            else:
+                print(f"Warning: label '{lbl}' not found in CSV columns. Skipping it.")
+
+        # Identify 'Split' column
+        if "Split" not in df_dataset.columns:
+            raise ValueError("CSV must have a 'Split' column.")
         splitIndex = df_dataset.columns.get_loc("Split")
-        target_index = df_dataset.columns.get_loc(target_label)
+
+        # Identify columns for FileName0, FileName1, etc.
+        filename_indices = []
+        for i in range(self.view_count):
+            colname = f"{self.datapoint_loc_label}{i}"
+            if colname in df_dataset.columns:
+                filename_indices.append(df_dataset.columns.get_loc(colname))
+            else:
+                filename_indices.append(None)
+                print(f"Warning: Column '{colname}' not found in CSV. This view is skipped.")
+
+        self.fnames = []
+        self.outcome = []
+
+        # Filter rows by split
         for _, row in df_dataset.iterrows():
-            view_count = int(self.view_count)
-            filenameIndex = [
-                df_dataset.columns.get_loc(self.datapoint_loc_label + str(i))
-                for i in range(view_count)
-            ]
-            outcomeIndex = [
-                df_dataset.columns.get_loc(self.target_label) for _ in range(view_count)
-            ]
-            fileMode = row.iloc[splitIndex].lower()
-            fileName = [row.iloc[i] for i in filenameIndex]
-            outcomes = [row.iloc[i] for i in outcomeIndex]
+            file_mode = str(row.iloc[splitIndex]).lower()
+            if split not in ["all", file_mode]:
+                continue
 
-            ##Append all files to file_vids array
-            file_vids = [
-                i for i in fileName if self.split in ["all", fileMode] and os.path.exists(i)
-            ]
-            if len(file_vids) > 1:
-                self.fnames.append(file_vids)
-                self.outcome.append(outcomes)
+            # Gather the paths for each view
+            view_files = []
+            # Get filenames for each view
+            file_names = []
+            for fi in filename_indices:
+                if fi is not None:
+                    file_name = row.iloc[fi]
+                    if isinstance(file_name, str) and os.path.exists(file_name):
+                        file_names.append(file_name)
+                    else:
+                        file_names.append(None)
+                else:
+                    file_names.append(None)
+
+            # Only append if we have valid files for at least 2 views
+            valid_files = [f for f in file_names if f is not None]
+            if len(valid_files) > 1:
+                self.fnames.append(file_names)
+
+                # Build outcome dict
+                outcome_dict = {}
+                for lbl, idx in self.target_indices.items():
+                    raw_val = row.iloc[idx]
+                    outcome_dict[lbl] = raw_val
+                self.outcome.append(outcome_dict)
+
+        # Weighted sampling logic if needed ...
+        # e.g. self.weight_list = ...
         if self.debug:
-            print(self.fnames)
-            print(len(self.fnames))
-            print(self.outcome)
-            print(len(self.outcome))
-
-        self.frames = collections.defaultdict(list)
-        self.trace = collections.defaultdict(_defaultdict_of_lists)
-
-        if self.weighted_sampling is True:
-            # define weights for weighted sampling
-            labels = np.array(
-                [self.outcome[ind][target_index] for ind in range(len(self.outcome))], dtype=int
-            )
-
-            # binary weights length == 2
-            weights = 1 - (np.bincount(labels) / len(labels))
-            self.weight_list = np.zeros(len(labels))
-
-            for label in range(len(weights)):
-                weight = weights[label]
-                self.weight_list[np.where(labels == label)] = weight
-
-    #         # define weights for weighted sampling
-    #         labels = np.array([self.outcome[ind][target_index] for ind in range(len(self.outcome))], dtype=int)
-    #         weights = 1 - (np.bincount(labels) / len(labels))
-
-    #         self.weight_list = np.zeros(len(labels))
-
-    #         for label in range(len(weights)):
-    #             weight = weights[label]
-    #             self.weight_list[np.where(labels == label)] = weight
-
-    def make_video(self, video, count, index):
-        video = orion.utils.loadvideo(video).astype(np.float32)
-
-        if self.apply_mask:
-            path = video_fname.rsplit("/", 2)
-            mask_filename = f"{path[0]}/mask/{path[2]}"
-            mask_filename = mask_filename.split(".avi")[0] + ".npy"
-
-            mask = np.load(mask_filename).transpose(2, 0, 1)
-
-            # fix mask shapes
-            length = video.shape[2]
-            if mask.shape[1] < length:
-                mask = np.pad(mask, [(0, 0), (length - mask.shape[1], 0), (0, 0)])
-            if mask.shape[2] < length:
-                mask = np.pad(mask, [(0, 0), (0, 0), (length - mask.shape[2], 0)])
-            if mask.shape[1] > length:
-                mask = mask[:, :length, :]
-            if mask.shape[2] > length:
-                mask = mask[:, :, :length]
-
-            for ind in range(video.shape[0]):
-                video[ind, :, :, :] = video[ind, :, :, :] * mask
-        # Add simulated noise (black out random pixels)
-        # 0 represents black at this point (video has not been normalized yet)
-        if self.noise is not None:
-            n = video.shape[1] * video.shape[2] * video.shape[3]
-            ind = np.random.choice(n, round(self.noise * n), replace=False)
-            f = ind % video.shape[1]
-            ind //= video.shape[1]
-            i = ind % video.shape[2]
-            ind //= video.shape[2]
-            j = ind
-            video[:, f, i, j] = 0
-
-        video = torch.from_numpy(video)
-        # if self.debug is True:
-        #    self.plot_middle_frame(video, "original", index)
-
-        if self.resize is not None:
-            video = v2.Resize((self.resize, self.resize), antialias=True)(video)
-        #       apply normalization before augmentaiton per riselab and torchvision
-        #       first initialization is a float of 0 so need to avoid indexing a float
-
-        #       apply normalization before augmentaiton per riselab and torchvision
-
-        # If self.mean and self.std are defined, apply normalization
-        if self.normalize == True:
-            if hasattr(self, "mean") and hasattr(self, "std"):
-                video = v2.Normalize(self.mean, self.std)(video)
-
-        # if self.debug is True:
-        #    self.plot_middle_frame(video, "after normalize", index)
-        if self.video_transforms is not None:
-            transforms = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
-            scripted_transforms = torch.jit.script(transforms)
-            video = scripted_transforms(video)
-
-        if self.rand_augment:
-            raug = [v2.RandAugment(magnitude=9, num_ops=2)]
-
-            raug_composed = v2.Compose(raug)
-            video = video.to(torch.uint8)
-            video = raug_composed(video)
-        # if self.debug is True:
-        #   self.plot_middle_frame(video, "after random augment", index)
-        video = video.permute(1, 0, 2, 3)
-        video = video.numpy()
-
-        # Set number of frames
-        c, f, h, w = video.shape
-        length = f // self.period if self.length is None else self.length
-        if self.max_length is not None:
-            # Shorten videos to max_length
-            length = min(length, self.max_length)
-
-        if f < length * self.period:
-            # Pad video with frames filled with zeros if too short
-            # 0 represents the mean color (dark grey), since this is after normalization
-            video = np.concatenate(
-                (video, np.zeros((c, length * self.period - f, h, w), video.dtype)), axis=1
-            )
-            c, f, h, w = video.shape  # pylint: disable=E0633
-
-        if self.clips == "all":
-            # Take all possible clips of desired length
-            start = np.arange(f - (length - 1) * self.period)
-        else:
-            # Take random clips from video
-            start = np.random.choice(f - (length - 1) * self.period, self.clips)
-
-        # Select random clips
-        video = tuple(video[:, s + self.period * np.arange(length), :, :] for s in start)
-        video = video[0] if self.clips == 1 else np.stack(video)
-
-        if self.pad is not None:
-            # Add padding of zeros (mean color of videos)
-            # Crop of original size is taken out
-            # (Used as augmentation)
-            c, l, h, w = video.shape
-            temp = np.zeros((c, l, h + 2 * self.pad, w + 2 * self.pad), dtype=video.dtype)
-            temp[
-                :, :, self.pad : -self.pad, self.pad : -self.pad
-            ] = video  # pylint: disable=E1130
-            i, j = np.random.randint(0, 2 * self.pad, 2)
-            video = temp[:, :, i : (i + h), j : (j + w)]
-
-        return video
-
-    def make_targets(self, index):
-        # Gather targets
-        target = []
-        for t in self.target_label:
-            if t == "Filename1":
-                target.append(self.fnames[index][1])
-            elif self.split in ["clinical_test", "external_test"]:
-                target.append(np.float32(0))
-            else:
-                target.append(np.float32(self.outcome[index]))
-
-            if target != []:
-                target = tuple(target) if len(target) > 1 else target[0]
-                if self.target_transform is not None:
-                    target = self.target_transform(target)
-
-            return target
-
-    def __getitem__(self, index):
-        # print(f"Loading data at index: {index}")
-        if self.split == "external_test":
-            for i in self.fnames[index][0]:
-                video = os.path.join(self.external_test_location, i)
-        elif self.split == "clinical_test":
-            for i in self.fnames[index][0]:
-                video = os.path.join(self.folder, "ProcessedStrainStudyA4c", i)
-        else:
-            vids_stack = []
-            filenames = []
-            if self.split == "inference":
-                for count, i in enumerate(self.fnames[index]):
-                    video = Video_Multi.make_video(self, i, count, index)
-                    vids_stack.append(video)
-                    filenames.append(i)
-                return vids_stack, filenames
-            else:
-                targets = []
-                # print(self.fnames[index])
-                for count, i in enumerate(self.fnames[index]):
-                    # print(len(self.fnames[index]))
-                    # print(self.fnames[index])
-                    video = Video_Multi.make_video(self, i, count, index)
-                    vids_stack.append(video)
-                    target = Video_Multi.make_targets(self, index)
-                    targets.append(target)
-                    filenames.append(i)
-
-                # print("Targets 1,1", targets[1][1])
-                # print("Vids_stack", len(vids_stack))
-                # print("Filenames Video.py", filenames)
-
-                return vids_stack, targets[1][1], filenames
-
-                # return vids_stack, targets[1][1]
+            print(f"[Video_Multi] Found {len(self.fnames)} samples for split={split}")
 
     def __len__(self):
         return len(self.fnames)
+
+    def __getitem__(self, index):
+        # Get filenames for all views of the current sample
+        video_fnames = self.fnames[index]
+
+        # List to hold processed video tensors for each view
+        view_tensors = []
+
+        for fname in video_fnames:
+            # Load the video for this view
+            video_np = orion.utils.loadvideo(fname).astype(np.float32)
+
+            # Apply mask if enabled
+            if self.apply_mask:
+                path = fname.rsplit("/", 2)
+                mask_filename = f"{path[0]}/mask/{path[2]}"
+                mask_filename = mask_filename.split(".avi")[0] + ".npy"
+                mask = np.load(mask_filename).transpose(2, 0, 1)
+
+                # Apply mask to the video (code from original Video class)
+                length = video_np.shape[1]
+                if mask.shape[1] < length:
+                    mask = np.pad(mask, [(0, 0), (length - mask.shape[1], 0), (0, 0)])
+                if mask.shape[2] < length:
+                    mask = np.pad(mask, [(0, 0), (0, 0), (length - mask.shape[2], 0)])
+                mask = mask[:, :length, :length]
+
+                for ind in range(video_np.shape[0]):
+                    video_np[ind, :, :, :] *= mask
+
+            # Add noise if specified
+            if self.noise is not None and self.noise > 0:
+                n = video_np.shape[1] * video_np.shape[2] * video_np.shape[3]
+                ind = np.random.choice(n, round(self.noise * n), replace=False)
+                f = ind % video_np.shape[1]
+                ind //= video_np.shape[1]
+                i = ind % video_np.shape[2]
+                j = ind // video_np.shape[2]
+                video_np[:, f, i, j] = 0
+
+            # Convert to tensor and resize
+            video = torch.from_numpy(video_np)
+            if self.resize is not None:
+                video = v2.Resize((self.resize, self.resize), antialias=True)(video)
+
+            # Normalize
+            if self.normalize and self.mean is not None and self.std is not None:
+                video = v2.Normalize(self.mean, self.std)(video)
+
+            # Apply video transforms
+            if self.video_transforms:
+                transform = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
+                scripted = torch.jit.script(transform)
+                video = scripted(video)
+
+            # Apply RandAugment
+            if self.rand_augment:
+                raug = v2.RandAugment(magnitude=9, num_ops=2)
+                video = raug(video)
+
+            # Handle frame count and period
+            F, C, H, W = video.shape  # Original frame count
+
+            # Calculate total frames needed BEFORE downsampling
+            frames_needed = self.length * self.period
+
+            if F < frames_needed:
+                # Pad with zeros
+                pad_size = frames_needed - F
+                video = torch.cat(
+                    [video, torch.zeros((pad_size, C, H, W), dtype=video.dtype)], dim=0
+                )
+            elif F > frames_needed:
+                # Random temporal crop
+                start = np.random.randint(0, F - frames_needed)
+                video = video[start : start + frames_needed]
+
+            # Now downsample by period
+            if self.period > 1:
+                video = video[:: self.period]  # This should give exactly self.length frames
+
+            # Final validation
+            assert video.shape[0] == self.length, (
+                f"Final frame count mismatch: {video.shape[0]} vs {self.length}. "
+                f"Check length={self.length} and period={self.period} configuration."
+            )
+
+            view_tensors.append(video)
+
+        # Get target labels
+        target = {}
+        for lbl in self.target_label_list:
+            raw_val = self.outcome[index].get(lbl, None)
+            # Convert string labels to numeric using labels_map if provided
+            if lbl in self.labels_map and isinstance(raw_val, str):
+                target[lbl] = self.labels_map[lbl].get(raw_val, raw_val)
+            else:
+                target[lbl] = raw_val
+
+        return view_tensors, target, video_fnames
 
     def plot_middle_frame(self, x, title, index):
         # Only plot for every 10th example
@@ -734,64 +711,3 @@ class Video_Multi(torch.utils.data.Dataset):
             plt.title(title)
             plt.axis("off")
             plt.show()
-
-
-def _defaultdict_of_lists():
-    """Returns a defaultdict of lists.
-    This is used to avoid issues with Windows (if this function is anonymous,
-    the Video dataset cannot be used in a dataloader).
-    """
-
-    return collections.defaultdict(list)
-
-
-def format_mean_std(input_value):
-    """
-    Formats the mean or std value to a list of floats.
-
-    Args:
-        input_value (str, list, np.array): The input mean/std value.
-
-    Returns:
-        list: A list of floats.
-
-    Raises:
-        ValueError: If the input cannot be converted to a list of floats.
-    """
-
-    if input_value is 1.0 or input_value is 0.0:
-        print("Mean/STD value is not defined")
-        return input_value
-
-    # Check if input is a list with a single string element
-    if (
-        isinstance(input_value, list)
-        and len(input_value) == 1
-        and isinstance(input_value[0], str)
-    ):
-        # Extract the string from the list and process it
-        input_value = input_value[0]
-
-    if isinstance(input_value, str):
-        # Remove any brackets or extra whitespace and split the string
-        cleaned_input = (
-            input_value.replace("[", "").replace("]", "").strip().replace("’", "").split()
-        )
-        try:
-            # Convert the split string values to float
-            formatted_value = [float(val) for val in cleaned_input]
-        except ValueError:
-            raise ValueError("String input for mean/std must be space-separated numbers.")
-    elif isinstance(input_value, (list, np.ndarray)):
-        try:
-            # Convert elements to float
-            formatted_value = [float(val) for val in input_value]
-        except ValueError:
-            raise ValueError("List or array input for mean/std must contain numbers.")
-    else:
-        raise TypeError("Input for mean/std must be a string, list, or numpy array.")
-
-    if len(formatted_value) != 3:
-        raise ValueError("Mean/std must have exactly three elements (for RGB channels).")
-
-    return formatted_value
