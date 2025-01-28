@@ -130,17 +130,18 @@ class TransformerHead(nn.Module):
         x = self.fc(x)
         return x
 
+
 class MultiOutputHead(nn.Module):
     def __init__(self, dim_in, head_structure: dict[str, int]):
         """
         Initialize a multi-output head with different number of classes per head.
-        
+
         Args:
             dim_in (int): Input dimension
             head_structure (dict[str, int]): Dictionary mapping head names to their number of output classes
                 e.g. {"contrast_agent": 1, "main_structure": 5, "stent_presence": 1}
         """
-        super(MultiOutputHead, self).__init__()
+        super().__init__()
         self.dropout = nn.Dropout(p=0.5)
         self.heads = nn.ModuleDict()
         for head_name, num_classes in head_structure.items():
@@ -149,22 +150,20 @@ class MultiOutputHead(nn.Module):
             self.heads[head_name] = nn.Sequential(RegressionHead(dim_in, num_classes))
 
         self.head_structure = head_structure
-        
+
     def forward(self, x):
         """
         Forward pass through all heads.
-        
+
         Args:
             x (torch.Tensor): Input tensor of shape [batch_size, dim_in]
-            
+
         Returns:
             dict[str, torch.Tensor]: Dictionary mapping head names to their outputs
         """
         x = self.dropout(x)
-        return {
-            head_name: head_module(x)
-            for head_name, head_module in self.heads.items()
-        }
+        return {head_name: head_module(x) for head_name, head_module in self.heads.items()}
+
 
 def replace_final_layer(model, config):
     """
@@ -202,9 +201,15 @@ def replace_final_layer(model, config):
                 )
             elif config["task"] == "classification":
                 if "head_structure" not in config:
-                    raise ValueError("head_structure must be defined in config for multi_head task")                
-                model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
-                print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")      
+                    raise ValueError(
+                        "head_structure must be defined in config for multi_head task"
+                    )
+                model.head = MultiOutputHead(
+                    dim_in=in_features, head_structure=config["head_structure"]
+                )
+                print(
+                    f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
+                )
             else:
                 raise ValueError(f"Unsupported task: {config['task']}")
     elif hasattr(model, "blocks") and hasattr(model.blocks[-1], "proj"):
@@ -233,8 +238,12 @@ def replace_final_layer(model, config):
         elif config["task"] == "classification":
             if "head_structure" not in config:
                 raise ValueError("head_structure must be defined in config for multi_head task")
-            model.blocks[-1] = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
-            print(f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")
+            model.blocks[-1] = MultiOutputHead(
+                dim_in=in_features, head_structure=config["head_structure"]
+            )
+            print(
+                f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
+            )
         else:
             raise ValueError(f"Unsupported task: {config['task']}")
     elif hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm):
@@ -248,8 +257,12 @@ def replace_final_layer(model, config):
         elif config["task"] == "classification":
             if "head_structure" not in config:
                 raise ValueError("head_structure must be defined in config for multi_head task")
-            model.head = MultiOutputHead(dim_in=in_features, head_structure=config["head_structure"])
-            print(f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})")            
+            model.head = MultiOutputHead(
+                dim_in=in_features, head_structure=config["head_structure"]
+            )
+            print(
+                f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
+            )
         else:
             raise ValueError(f"Unsupported task: {config['task']}")
     else:
@@ -268,6 +281,7 @@ def load_and_modify_model(config):
     resize = config.get("resize", 256)
     num_frames = config.get("frames", 64)
     print(f"model_name: {config['model_name']}")
+
     if config["model_name"] == "x3d_multi":
         model = x3d_multi(num_classes, **config)
     elif config["model_name"] == "timesformer":
@@ -301,7 +315,6 @@ def load_and_modify_model(config):
                 weights="KINETICS400_V1"
             )
         else:
-            print(config["model_name"])
             logging.basicConfig(level=logging.DEBUG)
             model = torch.hub.load(
                 "facebookresearch/pytorchvideo", config["model_name"], pretrained=True
@@ -321,12 +334,18 @@ def load_and_modify_model(config):
         model = replace_final_layer(model, config)
     elif config["model_name"] == "videopairclassifier":
         if "feature_extractor_backbone" not in config:
-            raise ValueError(
-                "feature_extractor_backbone must be defined in the configuration for VideoPairClassifier"
-            )
+            raise ValueError("feature_extractor_backbone must be defined")
+
+        # Get head structure from config
+        head_structure = config.get("head_structure", None)
+
         model = VideoPairClassifier(
-            num_classes=config["num_classes"],
+            head_structure=head_structure,  # Pass head structure
             feature_extractor_backbone=config["feature_extractor_backbone"],
+            checkpoint_path=config.get("feature_extractor_checkpoint_path", None),
+            num_frames=config.get("frames", 64),
+            freeze_ratio=0,
+            num_heads=2,
         )
     else:
         raise ValueError(f"Unsupported model: {config['model_name']}")
