@@ -143,7 +143,9 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
 
     # watch gradients only for rank 0
     if is_master:
-        wandb.watch(model)
+        wandb.watch(
+            model, log="all", log_freq=14
+        )  # Logs gradients and parameters every 100 steps
 
     ### If PyTorch 2.0 is used, the following line is needed to load the model
 
@@ -568,7 +570,7 @@ def run_training_or_evaluate_orchestrator(
         metrics=metrics,
         config=config,
     )
-    print("Filenames:", filenames)
+
     y = np.array(targets)
     yhat = np.array(predictions)
 
@@ -862,11 +864,8 @@ def build_model(config, device, model_path=None, for_inference=False):
     print(labels_map)
 
     # Add the new classification feature
-    if config["task"] == "classification":
-        if not labels_map:  # TODO: Handle cases where labels_map is None
-            raise ValueError(
-                "labels_map is not defined in the config file."
-            )  # raise error for now until we handle this case
+    if config["task"] == "classification" and not labels_map:
+        raise ValueError("labels_map is not defined in the config file.")
 
     # Check if the model should be resumed or used for inference
     if (model_path and config["resume"]) or for_inference:
@@ -1262,12 +1261,14 @@ def train_or_evaluate_epoch(
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
             for batch_idx, (data, outcomes, fnames) in enumerate(dataloader, 1):
-                # If multi-view, shape => list of length B, each item => list of Tensors
+                # If multi-view, shape => list of length B, each item => list of Tensor
+                #
                 if config["view_count"] is not None and config["view_count"] > 1:
-                    data = torch.stack(data, dim=1)  # [Batch, Views, T, C, H, W]
+                    data = torch.stack(data, dim=1)  # [Batch, Views, Frame, C, H, W]
 
-                    data = data.permute(0, 1, 3, 2, 4, 5)  # [Batch, Views, C, T, H, W]
-
+                    data = data.permute(
+                        0, 1, 3, 2, 4, 5
+                    )  # [Batch, Views, C, T, H, W] i.e. [4,2,3,72,256,256] with batch size of 4 and 2 videos
                     data = data.to(device)
 
                     # Process multi-head outcomes with string labels
@@ -1662,56 +1663,70 @@ def determine_class(y_hat):
 
 # TODO This function never supported regression output
 def format_dataframe_predictions(filenames, predictions, task, config, labels_map, targets):
-    """
-    Format predictions into a pandas DataFrame with 1 row per sample.
-    If each sample has 2 views, 'filename' can be stored as a list of 2 strings in that row.
-    """
-    # Build a DataFrame with as many rows as there are samples in `filenames`
-    # Here, each 'filenames[i]' is a list of 2 (or more) view-filepaths for that single sample
+    """Format predictions into a pandas DataFrame with 1 row per sample."""
     df_predictions = pd.DataFrame({"filename": filenames})
 
-    # For classification: each row => 1 prediction
     if task == "classification":
-        head_structure = config["head_structure"]
-        for head_name, pred_array in predictions.items():
-            if len(pred_array) != len(df_predictions):
-                raise ValueError(
-                    f"Mismatch: {len(pred_array)} predictions vs {len(df_predictions)} samples in filenames!"
-                )
-            # e.g. add probabilities
-            df_predictions[f"pred_{head_name}"] = pred_array
-
-            # Possibly add predicted class
-            num_classes = head_structure[head_name]
-            if num_classes <= 2:
-                # Convert to numpy array if needed
-                if isinstance(pred_array, list):
-                    pred_array = np.array(pred_array)
-
-                df_predictions[f"{head_name}_class"] = (
-                    pred_array >= config.get("binary_threshold", 0.5)
-                ).astype(int)
-            else:
-                print(
-                    f"Debug: pred_array type: {type(pred_array)}, shape: {np.array(pred_array).shape if isinstance(pred_array, list) else pred_array.shape}"
-                )
-                df_predictions[f"{head_name}_class"] = np.argmax(pred_array, axis=1)
-
-            # Add ground truth if present
-            if targets and head_name in targets:
-                if len(targets[head_name]) == len(df_predictions):
-                    df_predictions[f"target_{head_name}"] = targets[head_name]
-                else:
-                    print(f"Warning: length mismatch for head '{head_name}'")
+        _add_classification_predictions(df_predictions, predictions, config, targets)
     elif task == "regression":
-        df_predictions["pred"] = predictions
-        if targets is not None:
-            df_predictions["target"] = targets
-
+        _add_regression_predictions(df_predictions, predictions, targets)
     else:
         raise ValueError(f"Unsupported task: {task}")
 
     return df_predictions
+
+
+def _add_classification_predictions(df_predictions, predictions, config, targets):
+    """Add classification predictions and targets to DataFrame."""
+    head_structure = config["head_structure"]
+
+    for head_name, pred_array in predictions.items():
+        _validate_predictions_length(len(pred_array), len(df_predictions), head_name)
+
+        # Add raw predictions
+        df_predictions[f"pred_{head_name}"] = pred_array
+
+        # Add predicted class
+        num_classes = head_structure[head_name]
+        df_predictions[f"{head_name}_class"] = _get_predicted_classes(
+            pred_array, num_classes, config
+        )
+
+        # Add ground truth if present
+        _add_targets_if_present(df_predictions, targets, head_name)
+
+
+def _validate_predictions_length(pred_len, df_len, head_name):
+    """Validate predictions length matches DataFrame length."""
+    if pred_len != df_len:
+        raise ValueError(f"Mismatch: {pred_len} predictions vs {df_len} samples in filenames!")
+
+
+def _get_predicted_classes(pred_array, num_classes, config):
+    """Convert predictions to class labels."""
+    if isinstance(pred_array, list):
+        pred_array = np.array(pred_array)
+
+    if num_classes <= 2:
+        return (pred_array >= config.get("binary_threshold", 0.5)).astype(int)
+    else:
+        return np.argmax(pred_array, axis=1)
+
+
+def _add_targets_if_present(df_predictions, targets, head_name):
+    """Add target values to DataFrame if they exist."""
+    if targets and head_name in targets:
+        if len(targets[head_name]) == len(df_predictions):
+            df_predictions[f"target_{head_name}"] = targets[head_name]
+        else:
+            print(f"Warning: length mismatch for head '{head_name}'")
+
+
+def _add_regression_predictions(df_predictions, predictions, targets):
+    """Add regression predictions and targets to DataFrame."""
+    df_predictions["pred"] = predictions
+    if targets is not None:
+        df_predictions["target"] = targets
 
 
 def save_predictions_to_csv(df_predictions, config, split, epoch):

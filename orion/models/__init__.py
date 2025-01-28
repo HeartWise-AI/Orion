@@ -344,6 +344,8 @@ def load_and_modify_model(config):
             feature_extractor_backbone=config["feature_extractor_backbone"],
             checkpoint_path=config.get("feature_extractor_checkpoint_path", None),
             num_frames=config.get("frames", 64),
+            freeze_ratio=0,
+            num_heads=2,
         )
     else:
         raise ValueError(f"Unsupported model: {config['model_name']}")

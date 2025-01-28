@@ -401,7 +401,7 @@ def format_mean_std(input_value):
     Formats the mean or std value to a list of floats with length=3.
     """
 
-    if input_value is 1.0 or input_value is 0.0:
+    if input_value == 1.0 or input_value == 0.0:
         print("Mean/STD value is not defined or is trivial.")
         return input_value
 
@@ -590,95 +590,82 @@ class Video_Multi(torch.utils.data.Dataset):
         # Get filenames for all views of the current sample
         video_fnames = self.fnames[index]
 
-        # List to hold processed video tensors for each view
         view_tensors = []
-
-        for fname in video_fnames:
-            # Load the video for this view
+        for view_idx, fname in enumerate(video_fnames):
+            # --- 1) Load as [Channels, Frames, H, W]
             video_np = orion.utils.loadvideo(fname).astype(np.float32)
-
-            # Apply mask if enabled
-            if self.apply_mask:
-                path = fname.rsplit("/", 2)
-                mask_filename = f"{path[0]}/mask/{path[2]}"
-                mask_filename = mask_filename.split(".avi")[0] + ".npy"
-                mask = np.load(mask_filename).transpose(2, 0, 1)
-
-                # Apply mask to the video (code from original Video class)
-                length = video_np.shape[1]
-                if mask.shape[1] < length:
-                    mask = np.pad(mask, [(0, 0), (length - mask.shape[1], 0), (0, 0)])
-                if mask.shape[2] < length:
-                    mask = np.pad(mask, [(0, 0), (0, 0), (length - mask.shape[2], 0)])
-                mask = mask[:, :length, :length]
-
-                for ind in range(video_np.shape[0]):
-                    video_np[ind, :, :, :] *= mask
-
-            # Add noise if specified
-            if self.noise is not None and self.noise > 0:
-                n = video_np.shape[1] * video_np.shape[2] * video_np.shape[3]
-                ind = np.random.choice(n, round(self.noise * n), replace=False)
-                f = ind % video_np.shape[1]
-                ind //= video_np.shape[1]
-                i = ind % video_np.shape[2]
-                j = ind // video_np.shape[2]
-                video_np[:, f, i, j] = 0
-
-            # Convert to tensor and resize
             video = torch.from_numpy(video_np)
+
+            # --- 3) Apply mask or noise if needed
+            if self.apply_mask:
+                video = self._apply_mask(video, fname)  # make a small helper
+
+            # Optional: Add random noise
+            if self.noise is not None and self.noise > 0:
+                self._apply_noise_inplace(video)
+
+            # --- 4) Resize
             if self.resize is not None:
+                # v2.Resize expects each frame as [C,H,W], so shape = [F, C, H, W] is fine
+                # It will treat F as a batch.
                 video = v2.Resize((self.resize, self.resize), antialias=True)(video)
 
-            # Normalize
-            if self.normalize and self.mean is not None and self.std is not None:
+            # --- 5) Normalize
+            if self.normalize:
+                # If mean/std are [3,] => we can pass the entire 4D video
                 video = v2.Normalize(self.mean, self.std)(video)
 
-            # Apply video transforms
+            # --- 6) Random transforms
             if self.video_transforms:
-                transform = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
-                scripted = torch.jit.script(transform)
-                video = scripted(video)
+                # transforms will see shape [F, C, H, W].  It attempts to do the same transform across F frames.
+                # If your transforms do not handle 4D, you may need to apply them frame-by-frame.
+                transforms = v2.RandomApply(torch.nn.ModuleList(self.video_transforms), p=0.5)
+                scripted_t = torch.jit.script(transforms)
+                try:
+                    video = scripted_t(video)
+                except RuntimeError as e:
+                    print(
+                        f"[WARNING] transform failed on {fname} (sample {index}), skipping video. Error: {e}"
+                    )
+                    # skip or fallback:
+                    return self.__getitem__(index + 1 if index + 1 < len(self) else 0)
 
-            # Apply RandAugment
-            if self.rand_augment:
-                raug = v2.RandAugment(magnitude=9, num_ops=2)
-                video = raug(video)
+            # --- 7) Handle length & period
+            F, C, H, W = video.shape  # Now we interpret dimension 0 as frames
 
-            # Handle frame count and period
-            F, C, H, W = video.shape  # Original frame count
-
-            # Calculate total frames needed BEFORE downsampling
             frames_needed = self.length * self.period
-
             if F < frames_needed:
-                # Pad with zeros
                 pad_size = frames_needed - F
+                # Pad extra frames of zeros to get enough frames
                 video = torch.cat(
                     [video, torch.zeros((pad_size, C, H, W), dtype=video.dtype)], dim=0
                 )
             elif F > frames_needed:
-                # Random temporal crop
-                start = np.random.randint(0, F - frames_needed)
+                start = np.random.randint(0, F - frames_needed + 1)
                 video = video[start : start + frames_needed]
 
-            # Now downsample by period
+            # Downsample
             if self.period > 1:
-                video = video[:: self.period]  # This should give exactly self.length frames
+                video = video[:: self.period]
 
-            # Final validation
+            # Double check
+            if video.shape[0] == 0:
+                print(f"[WARNING] 0 frames left in sample {index} after cropping. Skipping.")
+                return self.__getitem__(index + 1 if index + 1 < len(self) else 0)
+
+            # We expect exactly self.length frames:
             assert video.shape[0] == self.length, (
-                f"Final frame count mismatch: {video.shape[0]} vs {self.length}. "
-                f"Check length={self.length} and period={self.period} configuration."
+                f"Frame mismatch: got {video.shape[0]}, expected {self.length}. "
+                f"File {fname}, index={index}"
             )
 
             view_tensors.append(video)
 
-        # Get target labels
+        # --- 8) Gather multi‐head or single‐head target
         target = {}
         for lbl in self.target_label_list:
             raw_val = self.outcome[index].get(lbl, None)
-            # Convert string labels to numeric using labels_map if provided
+            # Convert string → numeric if user has a labels_map
             if lbl in self.labels_map and isinstance(raw_val, str):
                 target[lbl] = self.labels_map[lbl].get(raw_val, raw_val)
             else:
