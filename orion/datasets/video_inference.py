@@ -9,6 +9,7 @@ import pandas as pd
 import skimage.draw
 import torch.utils.data
 from torchvision.transforms import v2
+from tqdm import tqdm
 
 import orion
 
@@ -112,7 +113,7 @@ class Video_inference(torch.utils.data.Dataset):
             os.path.join(self.folder, self.filename), sep="α", engine="python"
         )
         self.header = list(df_dataset.columns)
-
+        print("Header loaded successfully")
         if len(self.header) == 1:
             raise ValueError(
                 "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
@@ -122,7 +123,7 @@ class Video_inference(torch.utils.data.Dataset):
 
         splitIndex = list(df_dataset.columns).index("Split")
 
-        for i, row in df_dataset.iterrows():
+        for i, row in tqdm(df_dataset.iterrows(), total=len(df_dataset), desc="Processing dataset rows"):
             try:
                 fileName = os.path.join(self.folder, row.iloc[filenameIndex])
                 if pd.isna(fileName) or fileName == "":
@@ -158,7 +159,11 @@ class Video_inference(torch.utils.data.Dataset):
     #             weight = weights[label]
     #             self.weight_list[np.where(labels == label)] = weight
 
-    def __getitem__(self, index):
+    def __getitem__(self, index, _retry_count=0):
+        # Prevent infinite recursion by limiting retries
+        if _retry_count >= len(self):
+            raise RuntimeError("No valid videos found in dataset after trying all indices")
+        
         # Find filename of video
         if self.split == "external_test":
             video_fname = os.path.join(self.external_test_location, self.fnames[index])
@@ -168,9 +173,13 @@ class Video_inference(torch.utils.data.Dataset):
             video_fname = self.fnames[index]
 
         # Load video into np.array
-        # video = orion.utils.loadvideo(video).astype(np.float32)
-        # transforms
-        video = orion.utils.loadvideo(video_fname).astype(np.float32)
+        video = orion.utils.loadvideo(video_fname)
+        if video is None:
+            print(f"Skipping {video_fname} - failed to load video")
+            # Try next index
+            return self.__getitem__((index + 1) % len(self), _retry_count + 1)
+        
+        video = video.astype(np.float32)
 
         if self.apply_mask:
             path = video_fname.rsplit("/", 2)
@@ -488,7 +497,7 @@ def format_mean_std(input_value):
     if isinstance(input_value, str):
         # Remove any brackets or extra whitespace and split the string
         cleaned_input = (
-            input_value.replace("[", "").replace("]", "").strip().replace("’", "").split()
+            input_value.replace("[", "").replace("]", "").strip().replace("'", "").split()
         )
         try:
             # Convert the split string values to float
