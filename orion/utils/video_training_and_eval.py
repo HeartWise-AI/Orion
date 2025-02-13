@@ -885,13 +885,13 @@ def build_model(config, device, model_path=None, for_inference=False):
                 torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
                     model_state_dict, "module."
                 )
-                print("Removed prefix 'module.' from state dict")
+                print("Removed prefix 'module.' from state dict")          
 
-            model.load_state_dict(model_state_dict)
         except RuntimeError as e:
             print(f"Error loading model state dict: {e}")
 
         model.load_state_dict(model_state_dict)
+        print("Model loaded successfully")  
         model.to(device)
         if for_inference == False:
             ### Dont do distributed data parallel if inference is true.
@@ -901,8 +901,11 @@ def build_model(config, device, model_path=None, for_inference=False):
 
         # Additional code to load optimizer and scheduler states, and epoch
         optimizer_state = checkpoint.get("optimizer_state_dict")
+        print("Optimizer state loaded successfully")
         scheduler_state = checkpoint.get("scheduler_state_dict")
+        print("Scheduler state loaded successfully")
         epoch = checkpoint.get("epoch", 0)
+        print("Epoch loaded successfully")
         bestLoss = checkpoint.get("best_loss", float("inf"))
         other_metrics = {
             k: v
@@ -910,6 +913,7 @@ def build_model(config, device, model_path=None, for_inference=False):
             if k
             not in ["model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "epoch"]
         }
+        print("Other metrics loaded successfully")
 
         ## DDP works with TorchDynamo. When used with TorchDynamo, apply the DDP model wrapper before compiling the model,
         # such that torchdynamo can apply DDPOptimizer (graph-break optimizations) based on DDP bucket sizes.
@@ -982,9 +986,12 @@ def load_dataset(split, config, transforms, weighted_sampling):
             )
     else:
         if config["view_count"] is None:
+            print("Loading video inference dataset")
             dataset = orion.datasets.Video_inference(split=split, **kwargs)
+            print("Video inference dataset loaded successfully")
         else:
             dataset = orion.datasets.Video_Multi_inference(split=split, **kwargs)
+            print("Video multi inference dataset loaded successfully")
 
     return dataset
 
@@ -1450,7 +1457,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
 
     # Create data loader for inference
     dataset = load_dataset(split, config, None, False)
-
+    print("Dataset loaded successfully")
     split_dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=config["batch_size"],
@@ -1459,6 +1466,8 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
         pin_memory=(config["device"] == "cuda"),
         drop_last=(split != "test" and split != "inference"),
     )
+
+    print("Dataloader created successfully")
 
     if log_wandb:
         (
