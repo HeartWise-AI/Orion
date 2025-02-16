@@ -907,13 +907,13 @@ def build_model(config, device, model_path=None, for_inference=False):
                 torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
                     model_state_dict, "module."
                 )
-                print("Removed prefix 'module.' from state dict")          
+                print("Removed prefix 'module.' from state dict")
 
         except RuntimeError as e:
             print(f"Error loading model state dict: {e}")
 
         model.load_state_dict(model_state_dict)
-        print("Model loaded successfully")  
+        print("Model loaded successfully")
         model.to(device)
         if for_inference == False:
             ### Dont do distributed data parallel if inference is true.
@@ -1044,8 +1044,13 @@ def get_predictions(
         predictions[target_label] = []
         targets[target_label] = []
 
+    try:
+        is_main_process = dist.get_rank() == 0
+    except (ValueError, RuntimeError):
+        is_main_process = True
+    print("Performing inference", len(dataloader))
     with torch.inference_mode():  # Disable gradient calculations
-        with tqdm.tqdm(total=len(dataloader)) as pbar:
+        with tqdm.tqdm(total=len(dataloader), disable=not is_main_process) as pbar:
             for i, batch in enumerate(dataloader):
                 if len(batch) == 3:
                     # If the batch has three elements, it includes the middle tensor
@@ -1142,9 +1147,9 @@ def get_predictions(
                                 predictions[head_name].extend(
                                     torch.softmax(head_outputs, dim=1).detach().cpu().numpy()
                                 )
-                pbar.update()
-                pbar.set_description(f"Processing batch {i+1}/{len(dataloader)}")
-
+                if is_main_process:
+                    pbar.update()
+                    pbar.set_description(f"Processing batch {i+1}/{len(dataloader)}")
     return predictions, targets, filenames
 
 
@@ -1539,6 +1544,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
     print("Dataloader created successfully")
 
     if log_wandb:
+        print("Performing inference with WANDB logging")
         (
             average_losses,
             predictions,

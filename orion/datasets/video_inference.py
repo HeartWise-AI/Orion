@@ -121,9 +121,18 @@ class Video_inference(torch.utils.data.Dataset):
         # Add this line to store the DataFrame's header
         filenameIndex = list(df_dataset.columns).index(self.datapoint_loc_label)
 
-        splitIndex = list(df_dataset.columns).index("Split")
+        try:
+            splitIndex = list(df_dataset.columns).index("Split")
+        except ValueError:
+            print(
+                "'Split' column not found in dataset. Adding default 'Split' column.", self.split
+            )
+            df_dataset["Split"] = self.split
+            splitIndex = list(df_dataset.columns).index("Split")
 
-        for i, row in tqdm(df_dataset.iterrows(), total=len(df_dataset), desc="Processing dataset rows"):
+        for i, row in tqdm(
+            df_dataset.iterrows(), total=len(df_dataset), desc="Processing dataset rows"
+        ):
             try:
                 fileName = os.path.join(self.folder, row.iloc[filenameIndex])
                 if pd.isna(fileName) or fileName == "":
@@ -135,9 +144,15 @@ class Video_inference(torch.utils.data.Dataset):
             if split in ["all", fileMode]:
                 if os.path.exists(fileName):
                     self.fnames.append(fileName)
-                    if (target_label is not None) and (not pd.isna(row.iloc[target_label])):
-                        self.outcome.append(row.iloc[target_label])
-                    else:
+                    try:
+                        target_label_idx = list(df_dataset.columns).index(target_label)
+                        if (target_label is not None) and (
+                            not pd.isna(row.iloc[target_label_idx])
+                        ):
+                            self.outcome.append(row.iloc[target_label_idx])
+                        else:
+                            self.outcome.append(None)
+                    except (ValueError, TypeError):
                         self.outcome.append(None)
                 else:
                     raise FileNotFoundError(f"The file {fileName} does not exist.")
@@ -163,7 +178,7 @@ class Video_inference(torch.utils.data.Dataset):
         # Prevent infinite recursion by limiting retries
         if _retry_count >= len(self):
             raise RuntimeError("No valid videos found in dataset after trying all indices")
-        
+
         # Find filename of video
         if self.split == "external_test":
             video_fname = os.path.join(self.external_test_location, self.fnames[index])
@@ -178,7 +193,7 @@ class Video_inference(torch.utils.data.Dataset):
             print(f"Skipping {video_fname} - failed to load video")
             # Try next index
             return self.__getitem__((index + 1) % len(self), _retry_count + 1)
-        
+
         video = video.astype(np.float32)
 
         if self.apply_mask:

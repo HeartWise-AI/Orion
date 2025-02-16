@@ -32,7 +32,7 @@ def loadvideo(filename: str) -> np.ndarray:
             - str: filename of video
     ---------------------------------------------------------------------------------
     Returns:
-        * np.ndarray: with dimensions (channels=3, frames, height, width). The
+        * np.ndarray: with dimensions (frames, channels=3, height, width). The
             values will be uint8's ranging from 0 to 255.
     ---------------------------------------------------------------------------------
     Sanity Checks / Bug fixes:
@@ -48,47 +48,40 @@ def loadvideo(filename: str) -> np.ndarray:
     TODO:
         * None
     """
-    try:
-        if not os.path.exists(filename):
-            print(f"File not found: {filename}")
-            return None
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"Could not find video file: {filename}")
 
-        file_extension = os.path.splitext(filename)[1]
-        if file_extension in [".mp4", ".avi"]:
-            capture = cv2.VideoCapture(filename)
+    file_extension = os.path.splitext(filename)[1]
 
-            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-            frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if file_extension in [".mp4", ".avi"]:
+        capture = cv2.VideoCapture(filename)
 
-            v = np.zeros((frame_count, frame_width, frame_height, 3), np.uint8)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            for count in range(frame_count):
-                ret, frame = capture.read()
-                if not ret:
-                    print(f"Failed to load frame #{count} of {filename}.")
-                    return None
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                v[count] = frame
+        v = np.zeros((frame_count, frame_height, frame_width, 3), np.uint8)
 
-            vid = v.transpose((0, 3, 1, 2))
+        for count in range(frame_count):
+            ret, frame = capture.read()
+            if not ret:
+                raise ValueError(f"Failed to load frame #{count} of {filename}")
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            v[count] = frame
 
-        elif file_extension == ".zarr":
+        capture.release()
+        vid = v.transpose((0, 3, 1, 2))  # (frames, channels, height, width)
+    elif file_extension == ".zarr":
+        try:
             data = zarr.open(filename, mode="r", synchronizer=zarr.ThreadSynchronizer())
-            vid = np.array(data.video)  # (64, 128, 128)
-            vid = np.transpose(vid, (1, 2, 0))  # Change shape to (128, 128, 64)
-            vid = np.stack((vid,) * 3, axis=-1)  # Change shape to (128, 128, 64, 3)
-            # Reshape the video to (64, 3, 128, 128)
-            vid = np.transpose(vid, (2, 3, 0, 1))  # Change shape to (64, 3, 128, 128)
-        else:
-            print(f"Unsupported file extension: {file_extension}")
-            return None
+            vid = np.array(data.video)  # (frames, height, width)
+            vid = np.stack((vid,) * 3, axis=1)  # (frames, channels=3, height, width)
+        except Exception as e:
+            raise ValueError(f"Error reading zarr file {filename}: {str(e)}")
+    else:
+        raise ValueError(f"Unsupported file extension: {file_extension}")
 
-        return vid
-
-    except Exception as e:
-        print(f"Error loading video {filename}: {e}")
-        return None
+    return vid
 
 
 def savevideo(filename: str, array: np.ndarray, fps: float | int = 1):
