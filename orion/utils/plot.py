@@ -170,46 +170,108 @@ def plot_multiclass_confusion(conf_mat, save_dir=None, tag="test"):
 def plot_regression_graphics_and_log_binarized_to_wandb(
     y, yhat, phase, epoch, binary_threshold, config
 ):
+    """
+    Plot regression-related metrics and log a binarized version of the data (via WandB).
+    Specifically, we treat the targets (y) and predictions (yhat) as regression outputs,
+    but also apply a threshold (`binary_threshold`) to evaluate them in a binary sense
+    (e.g., y > threshold => 1, else 0).
+
+    Parameters
+    ----------
+    y : array-like, torch.Tensor, or dict
+        Ground truth values. May be:
+          - Numpy array
+          - Torch tensor
+          - Dict with a single key (e.g., {"Value": [...]})
+    yhat : array-like, torch.Tensor, or dict
+        Predicted values in the same shapes/formats as y.
+    phase : str
+        "train", "val", etc. to indicate the phase for logging.
+    epoch : int
+        Current epoch number (for logging).
+    binary_threshold : float
+        Threshold above which we call predictions (or targets) "1", else "0".
+    config : dict
+        Configuration dictionary that should include 'metrics_control' specifying
+        how to optimize the threshold, etc.
+
+    Raises
+    ------
+    ValueError
+        If either y or yhat is a dict with multiple keys,
+        since we only support single-key dicts for this function.
+    """
+
+    import numpy as np
     import sklearn
+    import torch
 
-    # --- 1) Unwrap if dictionary ---
+    from orion.utils.plot import (
+        metrics_from_moving_threshold,
+        plot_moving_thresh_metrics,
+        plot_preds_distribution,
+    )
+
+    # --- 1) Unwrap y if it is a dictionary or a numpy array containing a dictionary ---
     if isinstance(y, dict):
-        # Expect exactly one key for single-output regression
+        # If it contains exactly one key (e.g., 'Value'), extract it
         if len(y) == 1:
-            y = next(iter(y.values()))  # e.g. {"Value": array(...)} -> array(...)
+            y = y[next(iter(y.keys()))]  # Extract the value associated with the first key
         else:
             raise ValueError(
-                f"Expected 1 key in 'y' dict for regression, found multiple: {list(y.keys())}"
+                f"Expected 1 key in `y` dict for regression, got keys: {list(y.keys())}"
+            )
+    elif isinstance(y, np.ndarray) and isinstance(y.item(), dict):
+        # Handle the case where y is a numpy array containing a dictionary
+        y_dict = y.item()
+        if len(y_dict) == 1:
+            y = y_dict[next(iter(y_dict.keys()))]
+        else:
+            raise ValueError(
+                f"Expected 1 key in `y` dict for regression, got keys: {list(y_dict.keys())}"
             )
 
+    # --- 2) Unwrap yhat if it is a dictionary or a numpy array containing a dictionary ---
     if isinstance(yhat, dict):
+        # If it contains exactly one key (e.g., 'Value'), extract it
         if len(yhat) == 1:
-            yhat = next(iter(yhat.values()))
+            yhat = yhat[next(iter(yhat.keys()))]
         else:
             raise ValueError(
-                f"Expected 1 key in 'yhat' dict for regression, found multiple: {list(yhat.keys())}"
+                f"Expected 1 key in `yhat` dict for regression, got keys: {list(yhat.keys())}"
+            )
+    elif isinstance(yhat, np.ndarray) and isinstance(yhat.item(), dict):
+        # Handle the case where yhat is a numpy array containing a dictionary
+        yhat_dict = yhat.item()
+        if len(yhat_dict) == 1:
+            yhat = yhat_dict[next(iter(yhat_dict.keys()))]
+        else:
+            raise ValueError(
+                f"Expected 1 key in `yhat` dict for regression, got keys: {list(yhat_dict.keys())}"
             )
 
-    # --- 2) Convert to numpy if they're torch Tensors ---
+    # --- 3) Convert torch tensors to numpy arrays ---
     if torch.is_tensor(y):
         y = y.detach().cpu().numpy()
     if torch.is_tensor(yhat):
         yhat = yhat.detach().cpu().numpy()
 
-    # Now both y and yhat are plain numpy arrays.
-    # The rest of your code is unchanged.
+    # --- 4) Ensure final y and yhat are numpy arrays (in case they're lists) ---
+    if not isinstance(y, np.ndarray):
+        y = np.array(y)
+    if not isinstance(yhat, np.ndarray):
+        yhat = np.array(yhat)
 
-    # Generate binary metrics
-    fpr = {}
-    tpr = {}
-    roc_auc = {}
+    # --- 5) Binarize the ground-truth, based on the provided threshold ---
     y_cat = np.where(y > binary_threshold, 1, 0)
 
+    # The rest is unchanged: compute an ROC, find an optimal threshold for predictions, etc.
     metric_for_cutoff_locator = config["metrics_control"]["optim_thresh"]
 
+    # Optionally plot distribution of predicted probabilities
     if config["metrics_control"]["plot_pred_distribution"]:
         plot_preds_distribution(y, yhat, phase=phase, epoch=epoch)
-        metrics_moving_thresh = metrics_from_moving_threshold(y_cat, np.array(yhat))
+        metrics_moving_thresh = metrics_from_moving_threshold(y_cat, yhat)
         optim_thresh = metrics_moving_thresh[metric_for_cutoff_locator].idxmax()
         print(f"Optimal cut-off threshold: {optim_thresh}, based on {metric_for_cutoff_locator}")
 
@@ -221,26 +283,30 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
                 epoch=epoch,
             )
 
-    fpr, tpr, _ = sklearn.metrics.roc_curve(y_cat, yhat)
-    roc_auc = sklearn.metrics.auc(fpr, tpr)
+    # --- 6) Compute and log ROC / confusion matrix ---
+    from sklearn.metrics import auc, roc_curve
+
+    fpr, tpr, _ = roc_curve(y_cat, yhat)
+    roc_auc = auc(fpr, tpr)
+
+    import wandb
 
     if phase == "val":
-        # wandb.log({"val_roc_auc_chart": wandb.plot.roc_curve(y_cat, yhat, title=f"val, epoch {epoch}")})
         wandb.log(
             {
                 "val_roc_auc": roc_auc,
                 "val_conf_mat": wandb.plot.confusion_matrix(
                     probs=None,
                     y_true=y_cat,
-                    preds=np.array(yhat) > optim_thresh,
+                    preds=(yhat > optim_thresh),
                     title=f"val, epoch {epoch}",
                 ),
             },
             commit=False,
         )
-        data = [[x, z] for (x, z) in zip(y, yhat)]
+        data = [[float(a), float(b)] for (a, b) in zip(y, yhat)]
         table = wandb.Table(data=data, columns=["y", "yhat"])
-        plotid = str(epoch) + "_scatterplot"
+        plotid = f"{epoch}_scatterplot_val"
         wandb.log(
             {
                 plotid: wandb.plot.scatter(
@@ -252,7 +318,6 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
         wandb.log({"train_roc_auc": roc_auc}, commit=False)
 
 
-# hy start
 def compute_roc_auc(y_true, y_hat):
     """
     ---------------------------------------------------------------------------------

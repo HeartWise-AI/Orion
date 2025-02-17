@@ -12,7 +12,7 @@ import torchvision.transforms as transforms
 
 import wandb
 
-# Add the parent directory of 'orion' to the Python path
+# Add the parent directory of 'orion' to the Python pa th
 dir2 = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 if dir2 not in sys.path:
     sys.path.append(dir2)

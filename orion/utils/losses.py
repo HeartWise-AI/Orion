@@ -59,8 +59,6 @@ class HuberLoss(Loss):
 @LossRegistry.register("l1")
 class L1Loss(Loss):
     def __call__(self, outputs, targets):
-        print(outputs.shape, targets.shape)
-        print(outputs, targets)
         return F.l1_loss(outputs.view(-1), targets)
 
 
