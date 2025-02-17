@@ -1,32 +1,37 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Type
 
 
-class Loss(object):
+class Loss:
     """Base class for all losses."""
+
     def __call__(self, *args, **kwargs):
         raise NotImplementedError
 
 
 class LossRegistry:
     """Registry for managing loss functions."""
-    _losses: Dict[str, Type[Loss]] = {}
+
+    _losses: dict[str, type[Loss]] = {}
 
     @classmethod
     def register(cls, name: str):
         """Decorator to register a loss function."""
+
         def wrapper(loss_cls):
             cls._losses[name] = loss_cls
             return loss_cls
+
         return wrapper
 
     @classmethod
-    def get(cls, name: str) -> Type[Loss]:
+    def get(cls, name: str) -> type[Loss]:
         """Get a loss function by name."""
         if name not in cls._losses:
-            raise ValueError(f"Loss {name} not found in registry. Available losses: {list(cls._losses.keys())}")
+            raise ValueError(
+                f"Loss {name} not found in registry. Available losses: {list(cls._losses.keys())}"
+            )
         return cls._losses[name]
 
     @classmethod
@@ -41,6 +46,7 @@ class MSELoss(Loss):
     def __call__(self, outputs, targets):
         return F.mse_loss(outputs.view(-1), targets)
 
+
 @LossRegistry.register("huber")
 class HuberLoss(Loss):
     def __init__(self, delta: float = 0.1):
@@ -49,15 +55,20 @@ class HuberLoss(Loss):
     def __call__(self, outputs, targets):
         return F.huber_loss(outputs.view(-1), targets, delta=self.delta)
 
+
 @LossRegistry.register("l1")
 class L1Loss(Loss):
     def __call__(self, outputs, targets):
+        print(outputs.shape, targets.shape)
+        print(outputs, targets)
         return F.l1_loss(outputs.view(-1), targets)
+
 
 @LossRegistry.register("rmse")
 class RMSELoss(Loss):
     def __call__(self, outputs, targets):
         return torch.sqrt(F.mse_loss(outputs.view(-1), targets))
+
 
 @LossRegistry.register("bce_logit")
 class BCEWithLogitsLoss(Loss):
@@ -71,11 +82,12 @@ class BCEWithLogitsLoss(Loss):
             outputs = outputs[:, 1]  # Select the second item for binary classification
         elif outputs.dim() > 1 and outputs.size(1) == 1:
             outputs = outputs.squeeze()  # Squeeze the dimension
-        
+
         # Convert targets to float type
         targets = targets.float()
-        
+
         return self.criterion(outputs, targets)
+
 
 @LossRegistry.register("ce")
 class CrossEntropyLoss(Loss):
@@ -87,56 +99,58 @@ class CrossEntropyLoss(Loss):
         targets = targets.squeeze().long()
         return self.criterion(outputs, targets)
 
+
 @LossRegistry.register("multiclass_focal")
 class MultiClassFocalLoss(Loss):
     def __init__(self, gamma: float = 2.0):
         self.gamma = gamma
-        self.ce_loss = nn.CrossEntropyLoss(reduction='none')
-        
+        self.ce_loss = nn.CrossEntropyLoss(reduction="none")
+
     def __call__(self, pred, target):
         """Compute Multi-class Focal Loss"""
         ce_loss = self.ce_loss(pred, target)
         pt = torch.exp(-ce_loss)
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
         return focal_loss.mean()
-    
+
+
 @LossRegistry.register("binary_focal")
 class BinaryFocalLoss(Loss):
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
         self.alpha = alpha
         self.gamma = gamma
-    
+
     def __call__(self, pred, target):
         """Compute Binary Focal Loss"""
         pred = pred.squeeze()
         target = target.float()
-        
+
         bce_loss = self.bce_loss(pred, target)
         probs = torch.sigmoid(pred)
         pt = torch.where(target == 1, probs, 1 - probs)
         focal_weight = (1 - pt) ** self.gamma
-        
+
         if self.alpha is not None:
             alpha_weight = torch.where(target == 1, self.alpha, 1 - self.alpha)
             focal_weight = focal_weight * alpha_weight
-        
+
         return (focal_weight * bce_loss).mean()
-    
-    
+
+
 @LossRegistry.register("multi_head")
 class MultiHeadLoss(nn.Module):
     def __init__(
-        self, 
-        head_structure: Dict[str, int], 
-        loss_structure: Dict[str, str] = None,
-        alpha: float = 0.25, 
+        self,
+        head_structure: dict[str, int],
+        loss_structure: dict[str, str] = None,
+        alpha: float = 0.25,
         gamma: float = 2.0,
-        head_weights: Dict[str, float] = None,
-        loss_weights: Dict[str, torch.Tensor] = None
+        head_weights: dict[str, float] = None,
+        loss_weights: dict[str, torch.Tensor] = None,
     ):
         """
         Initialize Multi-Head Loss with support for both standard and focal loss.
-        
+
         Args:
             head_structure (dict): Dictionary mapping head names to number of classes
             loss_structure (dict): Dictionary mapping head names to loss function names
@@ -149,7 +163,7 @@ class MultiHeadLoss(nn.Module):
         self.head_structure = head_structure
         self.head_weights = head_weights or {head: 1.0 for head in head_structure.keys()}
         self.loss_weights = loss_weights or {}
-        
+
         # Initialize loss functions for each head
         if loss_structure is None:
             # Default to BCE for binary and CE for multi-class
@@ -173,33 +187,31 @@ class MultiHeadLoss(nn.Module):
                     self.loss_fns[head] = LossRegistry.create(loss_name, weight=weight)
                 else:
                     self.loss_fns[head] = LossRegistry.create(loss_name)
-    
+
     def forward(
-        self, 
-        outputs: Dict[str, torch.Tensor], 
-        targets: Dict[str, torch.Tensor]
-    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        self, outputs: dict[str, torch.Tensor], targets: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         Calculate the combined loss for all heads.
-        
+
         Args:
             outputs (dict): Dictionary of model outputs for each head
             targets (dict): Dictionary of target values for each head
-            
+
         Returns:
             total_loss (torch.Tensor): Combined loss from all heads
             losses (dict): Individual losses per head for logging
         """
         losses = {}
         total_loss = 0.0
-        
+
         for head_name in self.head_structure.keys():
             # Compute loss using the appropriate loss function
             head_loss = self.loss_fns[head_name](outputs[head_name], targets[head_name])
-            
+
             # Apply head-specific weight
             head_weight = self.head_weights[head_name]
             losses[head_name] = head_loss
             total_loss += head_weight * head_loss
-        
+
         return total_loss, losses

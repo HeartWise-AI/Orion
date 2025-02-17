@@ -1264,8 +1264,8 @@ def train_or_evaluate_epoch(
         predictions = {}
         targets = {}
     else:
-        predictions = []
-        targets = []
+        predictions = {}
+        targets = {}
 
     filenames = []
     model_loss = config.get("loss")
@@ -1406,15 +1406,34 @@ def compute_loss_and_update_metrics(
 ):
     losses = {}
     if task == "regression":
-        # Handle dictionary case for regression
-        if isinstance(outputs, dict):
-            target_label = list(outputs.keys())[0]
-            outputs = outputs[target_label]
-            outcomes = outcomes[target_label]
+        # 1) Instantiate the loss function
+        loss_fn = LossRegistry.create(model_loss)  # e.g. "l1", "mse"
 
-        outputs = adjust_output_dimensions(outputs)
-        loss = LossRegistry.create(model_loss, outputs, outcomes).to(device)
+        # 2) Unwrap the single tensor if model returns { "Value": tensor(...) }
+        if isinstance(outputs, dict):
+            if len(outputs) == 1:
+                # Extract the single key's tensor
+                outputs = next(iter(outputs.values()))
+            else:
+                raise ValueError("Expected 1 key in `outputs` for regression, found multiple!")
+
+        # If your targets are also a dict, unwrap them as well
+        if isinstance(outcomes, dict):
+            if len(outcomes) == 1:
+                outcomes = next(iter(outcomes.values()))
+            else:
+                raise ValueError("Expected 1 key in `outcomes` for regression, found multiple!")
+
+        # 3) Now `outputs` and `outcomes` are both Tensors.
+        #    Reshape if needed (often necessary if shape is [B,1] or [B, ...]).
+        outputs = outputs.view(-1)
+        outcomes = outcomes.view(-1)
+
+        # 4) Finally compute the loss
+        loss = loss_fn(outputs, outcomes)
+
         losses["main_loss"] = loss
+        # Update regression metrics (already done in your code)
         metrics[phase].update(outputs, outcomes)
 
     elif task == "classification":

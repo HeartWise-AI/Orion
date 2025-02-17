@@ -2,6 +2,7 @@
 Functions for plotting results
 """
 
+import logging
 import os
 import random
 from itertools import cycle
@@ -17,12 +18,12 @@ from sklearn import metrics
 from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 import wandb
-import logging
 
-logging.getLogger('PIL').setLevel(logging.WARNING)         # hide DEBUG messages from PIL
-logging.getLogger('wandb').setLevel(logging.WARNING)       # hide DEBUG messages from wandb
-logging.getLogger('urllib3').setLevel(logging.WARNING)     # hide DEBUG messages from urllib3
-logging.getLogger('matplotlib').setLevel(logging.WARNING)  # hide DEBUG messages from matplotlib
+logging.getLogger("PIL").setLevel(logging.WARNING)  # hide DEBUG messages from PIL
+logging.getLogger("wandb").setLevel(logging.WARNING)  # hide DEBUG messages from wandb
+logging.getLogger("urllib3").setLevel(logging.WARNING)  # hide DEBUG messages from urllib3
+logging.getLogger("matplotlib").setLevel(logging.WARNING)  # hide DEBUG messages from matplotlib
+
 
 def plot_loss(log_path):
     """
@@ -171,6 +172,33 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
 ):
     import sklearn
 
+    # --- 1) Unwrap if dictionary ---
+    if isinstance(y, dict):
+        # Expect exactly one key for single-output regression
+        if len(y) == 1:
+            y = next(iter(y.values()))  # e.g. {"Value": array(...)} -> array(...)
+        else:
+            raise ValueError(
+                f"Expected 1 key in 'y' dict for regression, found multiple: {list(y.keys())}"
+            )
+
+    if isinstance(yhat, dict):
+        if len(yhat) == 1:
+            yhat = next(iter(yhat.values()))
+        else:
+            raise ValueError(
+                f"Expected 1 key in 'yhat' dict for regression, found multiple: {list(yhat.keys())}"
+            )
+
+    # --- 2) Convert to numpy if they're torch Tensors ---
+    if torch.is_tensor(y):
+        y = y.detach().cpu().numpy()
+    if torch.is_tensor(yhat):
+        yhat = yhat.detach().cpu().numpy()
+
+    # Now both y and yhat are plain numpy arrays.
+    # The rest of your code is unchanged.
+
     # Generate binary metrics
     fpr = {}
     tpr = {}
@@ -182,7 +210,6 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
     if config["metrics_control"]["plot_pred_distribution"]:
         plot_preds_distribution(y, yhat, phase=phase, epoch=epoch)
         metrics_moving_thresh = metrics_from_moving_threshold(y_cat, np.array(yhat))
-        # print(metrics_moving_thresh)
         optim_thresh = metrics_moving_thresh[metric_for_cutoff_locator].idxmax()
         print(f"Optimal cut-off threshold: {optim_thresh}, based on {metric_for_cutoff_locator}")
 
@@ -196,11 +223,9 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
 
     fpr, tpr, _ = sklearn.metrics.roc_curve(y_cat, yhat)
     roc_auc = sklearn.metrics.auc(fpr, tpr)
-    # Log metrics
-    # print("Phase", phase)
+
     if phase == "val":
         # wandb.log({"val_roc_auc_chart": wandb.plot.roc_curve(y_cat, yhat, title=f"val, epoch {epoch}")})
-
         wandb.log(
             {
                 "val_roc_auc": roc_auc,
@@ -213,7 +238,7 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
             },
             commit=False,
         )
-        data = [[x, y] for (x, y) in zip(y, yhat)]
+        data = [[x, z] for (x, z) in zip(y, yhat)]
         table = wandb.Table(data=data, columns=["y", "yhat"])
         plotid = str(epoch) + "_scatterplot"
         wandb.log(
@@ -223,11 +248,8 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
                 )
             }
         )
-
     elif phase == "train":
         wandb.log({"train_roc_auc": roc_auc}, commit=False)
-
-    return None
 
 
 # hy start
@@ -803,15 +825,12 @@ def log_binary_classification_metrics_to_wandb(
         class_names = ["0", "1"]
     else:
         class_names = [str(label) for label in label_map]
-        
+
     # Log the confusion matrix in wandb
     wandb.log(
         {
             f"{phase}_confusion_matrix": wandb.plot.confusion_matrix(
-                probs=None, 
-                y_true=y_true, 
-                preds=pred_labels, 
-                class_names=class_names
+                probs=None, y_true=y_true, preds=pred_labels, class_names=class_names
             )
         }
     )
@@ -845,15 +864,21 @@ def log_multiclass_metrics_to_wandb(
     # Retrieve metrics
     roc_auc = metrics_summary["auc"]
     conf_mat = metrics_summary["confmat"]
-    
+
     # Create default labels if labels_map is None
     if labels_map is None:
         num_classes = conf_mat.shape[0]  # Get number of classes from confusion matrix
         labels_map = {f"Class {i}": i for i in range(num_classes)}
-    
+
     # Log individual class AUCs
     for label in labels_map:
-        wandb.log({f"{phase}_roc_auc_macro_for_head_{head_name}_class_{label}": roc_auc[labels_map[label]]})
+        wandb.log(
+            {
+                f"{phase}_roc_auc_macro_for_head_{head_name}_class_{label}": roc_auc[
+                    labels_map[label]
+                ]
+            }
+        )
 
     if learning_rate is not None:
         wandb.log({"learning_rate": learning_rate})
@@ -866,10 +891,10 @@ def log_multiclass_metrics_to_wandb(
 
     # Log the confusion matrix as an image
     fig, ax = plt.subplots(figsize=(10, 8))
-    
+
     # Convert labels_map values to list for xticklabels and yticklabels
     labels_list = list(labels_map.keys())
-    
+
     sns.heatmap(
         conf_mat,
         annot=True,
@@ -885,10 +910,14 @@ def log_multiclass_metrics_to_wandb(
 
     # Log the confusion matrix as an image
     wandb.log({f"{phase}_epoch_{epoch}_confusion_matrix": wandb.Image(fig)})
-    log_multiclass_roc_curve_to_wandb(y_true, predictions, labels_map, roc_auc, phase, epoch, head_name)
+    log_multiclass_roc_curve_to_wandb(
+        y_true, predictions, labels_map, roc_auc, phase, epoch, head_name
+    )
 
 
-def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, phase, epoch, head_name):
+def log_multiclass_roc_curve_to_wandb(
+    y_true, y_pred, labels_map, auc_array, phase, epoch, head_name
+):
     """
     Log multi-class ROC curves to wandb.
 
@@ -927,7 +956,7 @@ def log_multiclass_roc_curve_to_wandb(y_true, y_pred, labels_map, auc_array, pha
             "gray",
         ]
     )
-    
+
     labels_list = list(labels_map.keys())
     for i, color in zip(range(num_classes), colors):
         fpr, tpr, _ = roc_curve(y_true[:, i], y_pred[:, i])
@@ -994,6 +1023,7 @@ def update_classification_metrics(metrics, preds, target, num_classes):
         metrics["auc"].update(preds, target_one_hot)
         metrics["auc_weighted"].update(preds, target)
         metrics["confmat"].update(preds.argmax(dim=1), target)
+
 
 def compute_classification_metrics(metrics):
     """
