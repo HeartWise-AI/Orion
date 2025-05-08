@@ -1,0 +1,31 @@
+model_name:  # overwritten by heartwise.config
+num_epochs: 20 
+output_dir: outputs # overwritten by heartwise.config
+model_path: best.pt # overwritten by heartwise.config
+data_filename: data.csv # overwritten by heartwise.config
+root: "."
+datapoint_loc_label: FileName
+use_amp: true
+mean: [112.24039459228516,112.24039459228516, 112.24039459228516]
+std: [39.012229919433594,39.012229919433594,39.012229919433594]
+frames:  # overwritten by heartwise.config
+device:  # overwritten by heartwise.config
+period: 2
+pretrained: false
+seed: 0
+num_workers:  # overwritten by heartwise.config
+batch_size:  # overwritten by heartwise.config
+label_smoothing: null
+label_smoothing_value: null
+class_weights: null
+loss: bce_logit_loss
+task: classification
+num_classes:  # overwritten by heartwise.config
+run_test: true
+rand_augment: false
+resize:  # overwritten by heartwise.config
+apply_mask: false
+view_count: null
+save_best: loss
+resume: false
+target_label: Outcome
