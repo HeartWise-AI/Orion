@@ -2,6 +2,7 @@ import os
 import pathlib
 import sys
 import time
+import math
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torchvision.transforms as transforms
+from torch.optim.lr_scheduler import _LRScheduler
 
 import wandb
 
@@ -33,6 +35,9 @@ from orion.models import (
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.utils import arg_parser, dist_eval_sampler, plot, video_training_and_eval
 from orion.utils.losses import LossRegistry
+from orion.utils.ssl_wandb_logging import SSLWandbLogger
+from orion.models.masked_video_modeling import MaskedVideoModeling
+from orion.models.rope_3d import Rope3D
 from orion.utils.plot import (
     bootstrap_metrics,
     bootstrap_multicalss_metrics,
@@ -53,6 +58,37 @@ from orion.utils.plot import (
     update_best_regression_metrics,
     update_classification_metrics,
 )
+
+
+class CosineAnnealingWithWarmup(_LRScheduler):
+    """Cosine annealing scheduler with linear warmup.
+    
+    During warmup, learning rate increases linearly from 0 to base_lr.
+    After warmup, learning rate follows cosine annealing down to min_lr.
+    This scheduler expects to be stepped after each batch, not epoch.
+    """
+    
+    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=1e-5, last_epoch=-1):
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.min_lr = min_lr
+        self.cosine_steps = total_steps - warmup_steps
+        super().__init__(optimizer, last_epoch)
+    
+    def get_lr(self):
+        if self.last_epoch < self.warmup_steps:
+            # Linear warmup
+            warmup_factor = (self.last_epoch + 1) / self.warmup_steps
+            return [base_lr * warmup_factor for base_lr in self.base_lrs]
+        else:
+            # Cosine annealing
+            progress = min((self.last_epoch - self.warmup_steps) / self.cosine_steps, 1.0)
+            cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return [
+                self.min_lr + (base_lr - self.min_lr) * cosine_factor 
+                for base_lr in self.base_lrs
+            ]
+
 
 try:
     from collections import OrderedDict
@@ -83,11 +119,12 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     print("Total devices", total_devices)
     print("Device ", device)
 
-    # initialize PyTorch distributed using environment variables
-    dist.init_process_group(backend="nccl", init_method="env://")
+    # initialize PyTorch distributed using environment variables with explicit device_id
+    # This fixes the warning about GPU mapping
+    torch.cuda.set_device(device)
+    dist.init_process_group(backend="nccl", init_method="env://", device_id=device)
     is_main_process = dist.get_rank() == 0
     print("is main process", is_main_process)
-    torch.cuda.set_device(device)
 
     torch.cuda.empty_cache()
     # Check to see if local_rank is 0
@@ -228,9 +265,31 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         for phase in metrics:
             for head_name, num_classes in head_structure.items():
                 metrics[phase][head_name] = initialize_classification_metrics(num_classes, device)
+    elif config["task"] == "masked_video_modeling":
+        # For MVM/SSL pretraining, we track reconstruction loss
+        weights = None
+        metrics = {
+            "train": {"reconstruction_loss": []},
+            "val": {"reconstruction_loss": []},
+            "test": {"reconstruction_loss": []}
+        }
+        
+        # Initialize SSL W&B logger if main process
+        ssl_logger = None
+        if is_master:
+            ssl_logger = SSLWandbLogger(
+                project=config.get('project', 'orion-ssl-mvm'),
+                entity=config.get('entity', None),
+                config=config,
+                name=config.get('experiment_name', f"mvm_{config['model_name']}"),
+                tags=['ssl', 'mvm', 'rope3d', config['model_name']],
+                notes=f"SSL pretraining with MVM on {config['model_name']}",
+                mode="online" if do_log else "disabled"
+            )
+            config['ssl_logger'] = ssl_logger
     else:
         raise ValueError(
-            f"Invalid task specified: {task}. Choose 'regression', 'classification' or 'multi_head'."
+            f"Invalid task specified: {task}. Choose 'regression', 'classification', 'masked_video_modeling' or 'multi_head'."
         )
 
     best_metrics = {
@@ -245,6 +304,35 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         len(dataloaders["train"].dataset),
         len(dataloaders["val"].dataset),
     )
+    
+    # Update the scheduler with actual dataloader length for cosine scheduler
+    if config.get("scheduler_type") == "cosine" and scheduler is not None:
+        actual_steps_per_epoch = len(dataloaders["train"])
+        warmup_epochs = config.get("warmup_epochs", 30)
+        total_epochs = config["num_epochs"]
+        
+        warmup_steps = warmup_epochs * actual_steps_per_epoch
+        total_steps = total_epochs * actual_steps_per_epoch
+        
+        # Set initial_lr for each param group if not present (needed for scheduler)
+        for group in optimizer.param_groups:
+            if 'initial_lr' not in group:
+                group['initial_lr'] = group['lr']
+        
+        # Recreate scheduler with actual steps
+        scheduler = CosineAnnealingWithWarmup(
+            optimizer,
+            warmup_steps=warmup_steps,
+            total_steps=total_steps,
+            min_lr=config.get("min_lr", 1e-5),
+            last_epoch=(epoch_resume - 1) * actual_steps_per_epoch if epoch_resume is not None else -1,
+        )
+        config["steps_per_epoch"] = actual_steps_per_epoch
+        
+        print(f"[Scheduler] Updated cosine scheduler with actual dataloader:")
+        print(f"  - Actual steps per epoch: {actual_steps_per_epoch}")
+        print(f"  - Warmup steps: {warmup_steps}")
+        print(f"  - Total steps: {total_steps}")
 
     for epoch in range(epoch_resume, config["num_epochs"]):
         print("Epoch #", epoch)
@@ -270,8 +358,16 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 labels_map=labels_map,
                 scaler=scaler,
                 args=args,
+                ssl_logger=config.get('ssl_logger', None) if 'ssl_logger' in config else None,
             )
             print(f"Epoch {epoch} {phase} time: {time.time() - start_time}")
+        
+        # Step the scheduler after both train and val phases (for epoch-based schedulers only)
+        if scheduler is not None:
+            scheduler_type = config.get("scheduler_type", "")
+            if scheduler_type in ["step", "cosine_warm_restart"]:  # NOT cosine - that's batch-based
+                scheduler.step()
+                print(f"[Scheduler] Stepped {scheduler_type} scheduler at epoch {epoch}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
     if config["run_test"]:
         # Clean up
@@ -503,6 +599,7 @@ def run_training_or_evaluate_orchestrator(
     labels_map=None,
     scaler=None,
     args=None,
+    ssl_logger=None,
 ):
     r"""
     Runs the training or evaluation orchestrator for a video model.
@@ -569,10 +666,69 @@ def run_training_or_evaluate_orchestrator(
         scheduler=scheduler,
         metrics=metrics,
         config=config,
+        ssl_logger=ssl_logger,
     )
 
-    y = np.array(targets)
-    yhat = np.array(predictions)
+    # For SSL tasks, skip metrics computation
+    if task == "masked_video_modeling":
+        # Only log losses for SSL tasks
+        learning_rate = optimizer.param_groups[0]["lr"] if scheduler is not None else config["lr"]
+        if do_log and "main_loss" in average_losses:
+            wandb.log({
+                f"{phase}/loss": average_losses["main_loss"],
+                f"{phase}/learning_rate": learning_rate,
+                "epoch": epoch
+            })
+            
+            # Additional SSL-specific logging if ssl_logger is available
+            if ssl_logger is not None:
+                # Calculate proper global step for epoch-level logging
+                # Use a separate step counter that doesn't conflict with batch-level logging
+                epoch_step = epoch * 10000  # Large multiplier to avoid conflicts
+                print(f"[SSL] Logging epoch {epoch} summary at step {epoch_step}")
+                
+                ssl_logger.log_training_dynamics(
+                    loss=average_losses["main_loss"],
+                    learning_rate=learning_rate,
+                    mask_ratio=config.get('mvm_config', {}).get('mask_ratio', 0.75),
+                    step=epoch_step
+                )
+                ssl_logger.log_epoch_summary(
+                    epoch=epoch,
+                    train_loss=average_losses["main_loss"] if phase == "train" else None,
+                    val_loss=average_losses["main_loss"] if phase == "val" else None,
+                    learning_rate=learning_rate,
+                    epoch_time=0.0,  # Would need to track this
+                    step=epoch_step  # Pass explicit step
+                )
+                # Don't update the internal step counter here since we're managing it explicitly
+            
+            # Save checkpoints for MVM during validation
+            if phase == "val":
+                current_val_loss = average_losses["main_loss"]
+                print(f"[MVM Checkpoint] Phase: {phase}, Epoch: {epoch}, Val Loss: {current_val_loss:.6f}, Best Loss: {best_metrics.get('best_loss', float('inf')):.6f}")
+                
+                # Save checkpoint
+                best_loss, _ = update_and_save_checkpoints(
+                    phase=phase,
+                    epoch=epoch,
+                    current_loss=current_val_loss,
+                    current_auc=None,  # No AUC for MVM
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    output=config["output_dir"],
+                    wandb=wandb,
+                    best_loss=best_metrics.get("best_loss", float('inf')),
+                    best_auc=None,
+                    task=task
+                )
+                best_metrics["best_loss"] = best_loss
+                print(f"[MVM Checkpoint] Updated best_loss: {best_loss:.6f}")
+        return best_metrics
+    
+    y = np.array(targets) if targets else np.array([])
+    yhat = np.array(predictions) if predictions else np.array([])
 
     learning_rate = optimizer.param_groups[0]["lr"] if scheduler is not None else config["lr"]
 
@@ -765,17 +921,24 @@ def update_and_save_checkpoints(
         if current_auc is not None
         else -1,  # save with -1 if AUC is not applicable
         "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
     }
     torch.save(save_data, save_path)
+    
+    # Also save epoch checkpoint for MVM tasks (useful for resuming)
+    if task == "masked_video_modeling" and phase == "val":
+        epoch_path = os.path.join(output, f"checkpoint_epoch_{epoch}.pt")
+        torch.save(save_data, epoch_path)
+        print(f"[MVM] Saved epoch checkpoint: {epoch_path}")
 
     if phase == "val":
-        if task == "regression" and current_loss < best_loss:
+        if task in ["regression", "masked_video_modeling"] and current_loss < best_loss:
             best_loss = current_loss
-            # Log and save only for regression since AUC is not relevant
+            # Log and save for regression and MVM (no AUC for these tasks)
             wandb.run.summary["best_loss"] = best_loss
             torch.save(save_data, best_path)
             wandb.log({"best_val_loss": best_loss})
+            print(f"[Checkpoint] Saved best model with loss: {best_loss:.6f} to {best_path}")
         elif task == "classification":
             if current_loss < best_loss:
                 best_loss = current_loss
@@ -917,8 +1080,11 @@ def build_model(config, device, model_path=None, for_inference=False):
         model.to(device)
         if for_inference == False:
             ### Dont do distributed data parallel if inference is true.
+            # For MVM and RoPE, we need find_unused_parameters since some modules don't have gradients
+            find_unused = config.get("task") == "masked_video_modeling" or config.get("use_rope", False)
             model = nn.parallel.DistributedDataParallel(
-                model, device_ids=[device.index], output_device=device.index
+                model, device_ids=[device.index], output_device=device.index,
+                find_unused_parameters=find_unused
             )
 
         # Additional code to load optimizer and scheduler states, and epoch
@@ -943,8 +1109,11 @@ def build_model(config, device, model_path=None, for_inference=False):
 
         return model, optimizer_state, scheduler_state, epoch, bestLoss, other_metrics, labels_map
     model.to(device)
+    # For MVM and RoPE, we need find_unused_parameters since some modules don't have gradients
+    find_unused = config.get("task") == "masked_video_modeling" or config.get("use_rope", False)
     model = nn.parallel.DistributedDataParallel(
-        model, device_ids=[device.index], output_device=device.index
+        model, device_ids=[device.index], output_device=device.index,
+        find_unused_parameters=find_unused
     )
     return model, None, None, 0, float("inf"), {}, labels_map
 
@@ -1165,31 +1334,58 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
         optim: Configured optimizer.
         scheduler: Configured scheduler (or None if not applicable).
     """
-    # Set up optimizer
+    # Helper function to create parameter groups with proper weight decay
+    def get_param_groups(model, weight_decay):
+        """Create parameter groups with proper weight decay.
+        
+        LayerNorm and bias parameters should not have weight decay applied.
+        """
+        decay_params = []
+        no_decay_params = []
+        
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+                
+            # Check if this is a bias or norm parameter
+            is_bias = name.endswith(".bias")
+            is_norm = ("norm" in name.lower()) or ("ln" in name.lower()) or ("bn" in name.lower())
+            
+            # Also exclude 1D parameters (often biases)
+            if is_bias or is_norm or param.ndim <= 1:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        
+        return [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+    
+    # Set up optimizer with proper weight decay groups
+    param_groups = get_param_groups(model, config["weight_decay"])
+    
     if config["optimizer"] == "SGD" or config["optimizer"] is None:
         optim = torch.optim.SGD(
-            model.parameters(),
+            param_groups,
             lr=config["lr"],
             momentum=0.9,
-            weight_decay=config["weight_decay"],
         )
     elif config["optimizer"] == "Adam":
         optim = torch.optim.Adam(
-            model.parameters(),
+            param_groups,
             lr=config["lr"],
-            weight_decay=config["weight_decay"],
         )
     elif config["optimizer"] == "AdamW":
         optim = torch.optim.AdamW(
-            model.parameters(),
+            param_groups,
             lr=config["lr"],
-            weight_decay=config["weight_decay"],
+            betas=config.get("betas", (0.9, 0.95)),  # MAE-style betas
         )
     elif config["optimizer"] == "RAdam":
         optim = torch.optim.RAdam(
-            model.parameters(),
+            param_groups,
             lr=config["lr"],
-            weight_decay=config["weight_decay"],
         )
 
     # ... [Include other optimizers like RAdam, AdamW, etc.] ...
@@ -1216,6 +1412,47 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
             T_0=10,
             last_epoch=(epoch_resume - 1) if epoch_resume is not None else -1,
         )
+    elif config["scheduler_type"] == "cosine":
+        # Cosine annealing with linear warmup - calculated in steps (batches)
+        warmup_epochs = config.get("warmup_epochs", 30)
+        total_epochs = config["num_epochs"]
+        min_lr = config.get("min_lr", 1e-5)
+        base_lr = config["lr"]
+        
+        # Calculate steps based on dataset size and batch size
+        # We need to estimate the number of batches per epoch
+        # This is a rough estimate - will be refined when dataloader is created
+        dataset_size = config.get("dataset_size", 10000)  # Default estimate
+        batch_size = config["batch_size"]
+        gradient_accumulation = config.get("gradient_accumulation_steps", 1)
+        steps_per_epoch = dataset_size // (batch_size * gradient_accumulation)
+        
+        warmup_steps = warmup_epochs * steps_per_epoch
+        total_steps = total_epochs * steps_per_epoch
+        
+        print(f"Setting up cosine scheduler with warmup (batch-based):")
+        print(f"  - Warmup epochs: {warmup_epochs} (~{warmup_steps} steps)")
+        print(f"  - Total epochs: {total_epochs} (~{total_steps} steps)")
+        print(f"  - Steps per epoch (estimate): {steps_per_epoch}")
+        print(f"  - Base LR: {base_lr}")
+        print(f"  - Min LR: {min_lr}")
+        
+        # Set initial_lr for each param group if not present (needed for resuming)
+        for group in optim.param_groups:
+            if 'initial_lr' not in group:
+                group['initial_lr'] = group['lr']
+        
+        # Create a custom scheduler that combines warmup and cosine annealing
+        scheduler = CosineAnnealingWithWarmup(
+            optim,
+            warmup_steps=warmup_steps,
+            total_steps=total_steps,
+            min_lr=min_lr,
+            last_epoch=(epoch_resume - 1) * steps_per_epoch if epoch_resume is not None else -1,
+        )
+        
+        # Store steps_per_epoch in config for later use
+        config["steps_per_epoch"] = steps_per_epoch
     else:
         scheduler = None
         print("No scheduler specified.")
@@ -1255,6 +1492,7 @@ def train_or_evaluate_epoch(
     scheduler=None,
     metrics=None,
     config=None,
+    ssl_logger=None,
 ):
     model.train(is_training)
     total_losses = {}
@@ -1319,13 +1557,27 @@ def train_or_evaluate_epoch(
 
                     # Handle outcomes based on whether it's a dictionary
                     if isinstance(outcomes, dict):
-                        outcomes = {k: v.to(device) for k, v in outcomes.items()}
+                        # Convert dict values to tensors if they're not already
+                        converted_outcomes = {}
+                        for k, v in outcomes.items():
+                            if isinstance(v, list):
+                                converted_outcomes[k] = torch.tensor(v, dtype=torch.float32).to(device)
+                            elif isinstance(v, torch.Tensor):
+                                converted_outcomes[k] = v.to(device)
+                            else:
+                                converted_outcomes[k] = torch.tensor(v, dtype=torch.float32).to(device)
+                        outcomes = converted_outcomes
                     else:
                         # If not a dictionary, convert to the expected format
                         target_label = config.get("target_label")
-                        if isinstance(target_label, str):
-                            target_label = [target_label]
-                        outcomes = {target_label[0]: outcomes.to(device)}
+                        if target_label is None:
+                            # For SSL tasks like masked_video_modeling, no target labels needed
+                            outcomes = None
+                        elif isinstance(target_label, str):
+                            outcomes = {target_label: outcomes.to(device)}
+                        else:
+                            # target_label is a list
+                            outcomes = {target_label[0]: outcomes.to(device)}
 
                     if config["model_name"] in ["timesformer", "stam"]:
                         # Add dummy view dimension for consistency
@@ -1344,6 +1596,63 @@ def train_or_evaluate_epoch(
                     if not isinstance(outputs, dict):
                         target_label = config.get("target_label", "main")
                         outputs = {target_label: outputs}
+                    
+                    # Log SSL visualizations if applicable
+                    if task == "masked_video_modeling" and ssl_logger is not None and phase == "train":
+                        # Log periodically (every N batches)
+                        global_step = epoch * len(dataloader) + batch_idx
+                        log_interval = config.get('ssl_log_interval', 50)
+                        if global_step % log_interval == 0:
+                            # Debug logging
+                            print(f"[SSL LOG] Batch {batch_idx}, Global step {global_step}, logging interval {log_interval}")
+                            # Always log that we reached a logging point
+                            wandb.log({"ssl/logging_checkpoint": global_step}, step=global_step)
+                            
+                            if isinstance(outputs, dict) and 'mask' in outputs:
+                                # Log basic mask statistics
+                                mask_ratio = outputs['mask'].float().mean().item()
+                                wandb.log({
+                                    "ssl/actual_mask_ratio": mask_ratio,
+                                    "ssl/batch_idx": batch_idx,
+                                }, step=global_step)
+                                
+                                # Log reconstruction metrics if available
+                                if 'target' in outputs and 'pred' in outputs:
+                                    ssl_logger.log_reconstruction_metrics(
+                                        pred=outputs['pred'],
+                                        target=outputs.get('target', outputs['pred']),
+                                        mask=outputs['mask'],
+                                        step=global_step
+                                    )
+                                    
+                                    # Log HOG-specific metrics if using HOG targets
+                                    target_type = config.get('mvm_config', {}).get('target_type', 'pixel')
+                                    if target_type == 'hog':
+                                        ssl_logger.log_hog_metrics(
+                                            pred_hog=outputs['pred'],
+                                            target_hog=outputs['target'],
+                                            mask=outputs['mask'],
+                                            step=global_step
+                                        )
+                                
+                                # Log visualizations
+                                if True:  # Always try to log visualizations
+                                    try:
+                                        # Get target type from config
+                                        target_type = config.get('mvm_config', {}).get('target_type', 'pixel')
+                                        ssl_logger.log_reconstruction_visualizations(
+                                            videos=data,
+                                            pred=outputs.get('pred', None),
+                                            mask=outputs['mask'],
+                                            num_samples=min(2, data.shape[0]),
+                                            step=global_step,
+                                            target_type=target_type,
+                                            hog_targets=outputs.get('target') if target_type == 'hog' else None
+                                        )
+                                    except Exception as e:
+                                        print(f"Visualization failed: {e}")
+                                        wandb.log({"ssl/viz_error": str(e)[:100]}, step=global_step)
+                    
                     # Now returns a dictionnary of losses {"main_loss": main_loss, "loss_1": loss_1, "loss_2": loss_2, ...}
                     losses = compute_loss_and_update_metrics(
                         outputs,
@@ -1358,20 +1667,31 @@ def train_or_evaluate_epoch(
                     )
 
                 # Initialize predictions and targets dictionaries for each head if not already done
-                for head_name in outputs.keys():
-                    if head_name not in predictions:
-                        predictions[head_name] = []
-                    if head_name not in targets:
-                        targets[head_name] = []
+                # Skip predictions/targets for SSL tasks like masked_video_modeling
+                if task not in ["masked_video_modeling"]:
+                    for head_name in outputs.keys():
+                        if head_name not in predictions:
+                            predictions[head_name] = []
+                        if head_name not in targets:
+                            targets[head_name] = []
 
-                    # Add predictions and targets for each head
-                    predictions[head_name].extend(
-                        get_predictions_during_training(outputs[head_name], task)
-                    )
-                    targets[head_name].extend(outcomes[head_name].detach().cpu().numpy())
+                        # Add predictions and targets for each head
+                        predictions[head_name].extend(
+                            get_predictions_during_training(outputs[head_name], task)
+                        )
+                        if outcomes is not None and head_name in outcomes:
+                            targets[head_name].extend(outcomes[head_name].detach().cpu().numpy())
 
                 if is_training:
                     backpropagate(optimizer, scaler, losses["main_loss"])
+                    
+                    # Step the scheduler after each batch for cosine scheduler
+                    if scheduler is not None and config.get("scheduler_type") == "cosine":
+                        scheduler.step()
+                        # Log learning rate occasionally
+                        if batch_idx % 100 == 0:
+                            current_lr = scheduler.get_last_lr()[0]
+                            print(f"[Scheduler] Batch {batch_idx}, LR: {current_lr:.6f}")
 
                 # Add the losses to the total_losses dictionary
                 for loss_name, loss_value in losses.items():
@@ -1471,6 +1791,20 @@ def compute_loss_and_update_metrics(
             update_classification_metrics(
                 metrics[phase][head_name], probabilities, outcomes[head_name], num_classes
             )
+    
+    elif task == "masked_video_modeling":
+        # For SSL tasks like MVM, there are no target labels
+        # The loss is computed entirely within the model's forward pass
+        # outputs should contain the loss already computed
+        if isinstance(outputs, dict) and "loss" in outputs:
+            losses["main_loss"] = outputs["loss"]
+        else:
+            # If outputs is a tensor, it should be the loss value directly
+            losses["main_loss"] = outputs if isinstance(outputs, torch.Tensor) else outputs.get("main_loss", torch.tensor(0.0))
+        
+        # For MVM, we track reconstruction loss
+        if phase in metrics and "reconstruction_loss" in metrics[phase]:
+            metrics[phase]["reconstruction_loss"].append(losses["main_loss"].item())
 
     return losses
 
@@ -1585,6 +1919,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
             scheduler=None,
             metrics=metrics,
             config=config,
+            ssl_logger=None,  # No SSL logger for inference
         )
 
         # Convert targets and predictions to numpy arrays for subsequent calculations
@@ -1883,6 +2218,12 @@ def main():
     import yaml
 
     args, additional_args = orion.utils.arg_parser.parse_args()
+    
+    # Handle GPU selection if specified
+    if hasattr(args, 'gpu') and args.gpu is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+        print(f"Setting CUDA_VISIBLE_DEVICES={args.gpu}")
+    
     print("Arguments:", args)
     print("Additional Arguments:", additional_args)
 

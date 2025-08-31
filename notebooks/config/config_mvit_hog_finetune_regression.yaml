@@ -1,0 +1,145 @@
+# MViT v2 S Fine-tuning for LVEF Regression after HOG MVM Pretraining
+# Fine-tune the HOG MVM pretrained model for LVEF regression (0-60 continuous values)
+
+# Training parameters
+num_epochs: !!int 30
+model_name: !!str mvit_v2_s
+data_filename: !!str /media/data1/datasets/CathEF/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days.csv
+output_dir: !!str "outputs_mvit_hog_finetune_regression"
+root: !!str "."
+datapoint_loc_label: !!str FileName
+label_loc_label: !!null null  # Not used for single-head regression
+target_label: Value  # Continuous LVEF value column for regression
+binary_threshold: !!float 40.0  # For metrics computation
+device: !!str cuda
+seed: !!int 42
+resume: !!bool false  # Not resuming from a checkpoint, loading pretrained weights instead
+
+# Load pretrained HOG MVM checkpoint
+pretrained: !!bool false  # Don't load ImageNet weights
+checkpoint_path: !!str "outputs_mvm_pretrain/mvit_v2_s_8_16_2_AdamW_new_20250826-233853_wsr2fciq/best.pt"
+load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
+
+# Task configuration - regression for LVEF
+task: !!str regression
+loss: !!str mse  # MSE loss for regression
+num_classes: !!int 1  # Single output for regression
+
+# MViT specific parameters
+frames: !!int 16  # MViT requires 16 frames
+resize: !!int 224  # MViT standard input size
+period: !!int 2
+view_count: !!int 1
+mean: [112.24039459228516, 112.24039459228516, 112.24039459228516]
+std: [39.012229919433594, 39.012229919433594, 39.012229919433594]
+
+# Optimizer configuration for fine-tuning
+optimizer: !!str AdamW
+weight_decay: !!float 0.05
+betas: [0.9, 0.999]
+num_workers: !!int 8
+batch_size: !!int 4  # Adjust based on GPU memory
+lr: !!float 0.00005  # Lower learning rate for fine-tuning
+
+# Learning rate scheduler
+scheduler_type: !!str cosine
+warmup_epochs: !!int 5
+min_lr: !!float 0.000001
+
+# Layer-wise learning rate decay for better fine-tuning
+layer_decay: !!float 0.75  # Each layer gets lr * (layer_decay ^ depth)
+layer_decay_enabled: !!bool true
+
+# Gradual unfreezing for fine-tuning
+video_freeze_schedule: !!str linear
+video_freeze_start: !!float 0.8  # Start with 80% frozen
+video_freeze_end: !!float 0.0   # End fully trainable
+video_freeze_warmup_epochs: !!int 10
+
+# 3D RoPE Configuration (keep same as pretraining if used)
+use_rope: !!bool true
+rope_base: !!float 10000.0
+rope_temporal_scale: !!float 1.0
+rope_normalize_mode: !!str separate
+
+# Mixed precision and gradient accumulation
+use_amp: !!bool true
+gradient_accumulation_steps: !!int 4
+gradient_clip_val: !!float 1.0
+
+# Data augmentation (lighter for fine-tuning)
+augment: !!bool true
+rand_augment: !!bool false
+crop_size: !!int 224
+horizontal_flip_prob: !!float 0.5
+vertical_flip_prob: !!float 0.0
+rotation_degrees: !!int 10
+brightness: !!float 0.1
+contrast: !!float 0.1
+saturation: !!float 0.1
+hue: !!float 0.05
+
+# Additional augmentation parameters
+random_erase_prob: !!float 0.0
+mixup_alpha: !!float 0.0  # No mixup for regression
+cutmix_alpha: !!float 0.0  # No cutmix for regression
+
+# Validation parameters
+val_split: !!float 0.2
+eval_every_n_epochs: !!int 1
+save_best_model: !!bool true
+save_best: !!str loss  # Save based on validation loss
+early_stopping_patience: !!int 10
+
+# Logging
+project: !!str "orion-mvit-hog-finetune-lvef"
+entity: !!str "mhi_ai"
+tag: !!str "mvit_hog_finetune_lvef_regression"
+log_interval: !!int 20
+save_checkpoint_every_n_epochs: !!int 5
+
+# Evaluation metrics for regression
+metrics_control:
+  optim_thresh: !!str rmse  # Use RMSE for regression
+  plot_pred_distribution: !!bool true
+  plot_metrics_moving_thresh: !!bool false  # Not applicable for regression
+  n_bootstrap: !!int 100
+  q_bootstrap: !!float 0.05
+
+# Model saving
+save_strategy: !!str best
+keep_last_n_checkpoints: !!int 3
+
+# Distributed training
+distributed: !!bool true
+backend: !!str nccl
+find_unused_parameters: !!bool true  # Needed for RoPE
+
+# Memory optimization
+pin_memory: !!bool true
+persistent_workers: !!bool true
+prefetch_factor: !!int 2
+
+# Test configuration
+run_test: !!bool false
+test_time_augmentation: !!bool false
+apply_mask: !!bool false
+weighted_sampling: !!bool false
+debug: !!bool false
+
+# Transforms (if needed)
+transforms: !!null null
+
+# No label smoothing for regression
+label_smoothing: !!null null
+label_smoothing_value: !!null null
+class_weights: !!null null
+
+# No label mappings needed for regression
+labels_map: !!null null
+
+# Frame sampling strategy
+frame_sampling:
+  strategy: !!str uniform
+  clip_duration: !!float 2.0
+  clips_per_video: !!int 1

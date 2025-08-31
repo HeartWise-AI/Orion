@@ -354,6 +354,10 @@ class Video(torch.utils.data.Dataset):
         if self.split == "inference":
             return video, self.fnames[index]
 
+        # For SSL/MVM pretraining without labels
+        if self.target_label is None:
+            return video, torch.tensor(0.0), video_fname  # Return dummy target
+        
         return video, target, video_fname
 
     def __len__(self):
