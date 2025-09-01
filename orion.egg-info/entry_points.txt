@@ -1,0 +1,4 @@
+[console_scripts]
+orion-inference = run_inference:main
+orion-sweep = run_sweep:main
+orion-train = orion.utils.video_training_and_eval:main

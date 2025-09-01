@@ -1,31 +1,101 @@
-[tool.poetry]
+[project]
 name = "orion"
 version = "0.1.0"
-description = ""
-authors = ["Robert Avram <robert.avram.md@gmail.com>"]
-license = "CC0"
+description = "Video training and evaluation framework for medical imaging"
+authors = [{name = "Robert Avram", email = "robert.avram.md@gmail.com"}]
+license = {text = "CC0"}
 readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: CC0 1.0 Universal (CC0 1.0) Public Domain Dedication",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-torch = "^2.4.0"
-matplotlib = "^3.8.2"
-pre-commit = "^3.6.0"
-numpy = "^1.26.2"
-torchmetrics = "^1.2.1"
-wandb = "^0.17.8"
-seaborn = "^0.13.0"
-tabulate = "^0.9.0"
-zarr = "^2.16.1"
-stam-pytorch = "^0.0.4"
-timesformer-pytorch = "^0.4.1"
-opencv-python = "^4.9.0.80"
-torchvision = "^0.19.0"
-scikit-image = "^0.22.0"
-pytorchvideo = "^0.1.5"
-scikit-learn = "^1.5.0"
+dependencies = [
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "matplotlib>=3.8.2",
+    "numpy>=1.26.2",
+    "torchmetrics>=1.2.1",
+    "wandb>=0.17.8",
+    "seaborn>=0.13.0",
+    "tabulate>=0.9.0",
+    "zarr>=2.16.1",
+    "stam-pytorch>=0.0.4",
+    "timesformer-pytorch>=0.4.1",
+    "opencv-python-headless>=4.9.0.80",
+    "scikit-image>=0.22.0",
+    "pytorchvideo>=0.1.5",
+    "scikit-learn>=1.5.0",
+    "tqdm",
+    "PyYAML",
+    "pandas",
+    "fvcore",
+]
 
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.6.0",
+    "black>=23.11.0",
+    "isort>=5.12.0",
+    "ruff>=0.1.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+orion-train = "orion.utils.video_training_and_eval:main"
+orion-inference = "run_inference:main"
+orion-sweep = "run_sweep:main"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["orion"]
+
+[tool.black]
+line-length = 98
+target-version = ['py310']
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+  | \.uv
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 98
+
+[tool.ruff]
+line-length = 98
+target-version = "py310"
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-v --cov=orion --cov-report=term-missing"

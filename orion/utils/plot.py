@@ -221,8 +221,8 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
             raise ValueError(
                 f"Expected 1 key in `y` dict for regression, got keys: {list(y.keys())}"
             )
-    elif isinstance(y, np.ndarray) and isinstance(y.item(), dict):
-        # Handle the case where y is a numpy array containing a dictionary
+    elif isinstance(y, np.ndarray) and y.size == 1 and isinstance(y.item(), dict):
+        # Handle the case where y is a numpy array containing a single dictionary element
         y_dict = y.item()
         if len(y_dict) == 1:
             y = y_dict[next(iter(y_dict.keys()))]
@@ -240,8 +240,8 @@ def plot_regression_graphics_and_log_binarized_to_wandb(
             raise ValueError(
                 f"Expected 1 key in `yhat` dict for regression, got keys: {list(yhat.keys())}"
             )
-    elif isinstance(yhat, np.ndarray) and isinstance(yhat.item(), dict):
-        # Handle the case where yhat is a numpy array containing a dictionary
+    elif isinstance(yhat, np.ndarray) and yhat.size == 1 and isinstance(yhat.item(), dict):
+        # Handle the case where yhat is a numpy array containing a single dictionary element
         yhat_dict = yhat.item()
         if len(yhat_dict) == 1:
             yhat = yhat_dict[next(iter(yhat_dict.keys()))]

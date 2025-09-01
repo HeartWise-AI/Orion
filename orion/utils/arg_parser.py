@@ -29,6 +29,12 @@ def parse_args():
         action="store_true",
         help="Flag to log in all processes, otherwise only in rank0",
     )
+    parser.add_argument(
+        "--gpu",
+        type=str,
+        default=None,
+        help="GPU device IDs to use (e.g., '0', '0,1', '0,1,2,3'). If not specified, uses CUDA_VISIBLE_DEVICES or all available GPUs.",
+    )
     # Parse known arguments first
     args, unknown = parser.parse_known_args()
 

@@ -2,6 +2,7 @@
 Defining models used for orion
 """
 import logging
+import math
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,8 @@ from stam_pytorch import STAM
 from timesformer_pytorch import TimeSformer
 
 from orion.models.config import _C
+from orion.models.masked_video_modeling import MaskedVideoModeling
+from orion.models.rope_3d import Rope3D
 from orion.models.videopairclassifier import VideoPairClassifier
 from orion.models.vivit import ViViT
 from orion.models.x3d_multi import Bottleneck as MultiBottleneck
@@ -165,6 +168,193 @@ class MultiOutputHead(nn.Module):
         return {head_name: head_module(x) for head_name, head_module in self.heads.items()}
 
 
+def _patch_mvit_attention_for_rope(model, rope_modules):
+    """Monkey-patch MViT's MultiScaleAttention to apply 3D RoPE.
+    
+    Args:
+        model: MViT model to patch
+        rope_modules: Dictionary of RoPE modules keyed by "{num_heads}_{head_dim}"
+    """
+    from types import MethodType
+    import torch.nn.functional as F
+    
+    def patched_forward(self_attn, x, thw):
+        """Patched forward for MultiScaleAttention with RoPE.
+        
+        Args:
+            x: Input tensor [B, N, C]
+            thw: Tuple of (T, H, W) dimensions
+        """
+        B, N, C = x.shape
+        T, H, W = thw
+        
+        # Get actual dimensions from the attention module
+        num_heads = self_attn.num_heads
+        head_dim = self_attn.head_dim
+        output_dim = self_attn.output_dim
+        
+        # Standard MViT attention computation
+        # Project to Q, K, V  
+        qkv = self_attn.qkv(x)
+        # The output dimension is output_dim * 3 (for q, k, v)
+        qkv = qkv.reshape(B, N, 3, num_heads, output_dim // num_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # [3, B, num_heads, N, head_dim]
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        
+        # Apply pooling if needed (MViT specific)
+        if hasattr(self_attn, 'pool_q') and self_attn.pool_q is not None:
+            q, thw_q = self_attn.pool_q(q, thw)
+        else:
+            thw_q = thw
+            
+        if hasattr(self_attn, 'pool_k') and self_attn.pool_k is not None:
+            k, thw_k = self_attn.pool_k(k, thw)
+        else:
+            thw_k = thw
+            
+        if hasattr(self_attn, 'pool_v') and self_attn.pool_v is not None:
+            v, thw_v = self_attn.pool_v(v, thw)
+        else:
+            thw_v = thw
+        
+        # Apply 3D RoPE to Q and K after pooling
+        T_q, H_q, W_q = thw_q
+        T_k, H_k, W_k = thw_k
+        
+        # Detect CLS tokens (N > T*H*W means we have special tokens)
+        expected_q = T_q * H_q * W_q
+        expected_k = T_k * H_k * W_k
+        n_special_q = max(0, q.shape[2] - expected_q)  # Usually 0 or 1
+        n_special_k = max(0, k.shape[2] - expected_k)
+        
+        # Apply RoPE if we have a matching module
+        actual_head_dim = q.shape[-1]
+        if rope_modules is not None and actual_head_dim % 6 == 0:
+            rope_key = f"{num_heads}_{actual_head_dim}"
+            if rope_key in rope_modules:
+                try:
+                    rope_module = rope_modules[rope_key]
+                    # Handle Q and K separately if they have different dimensions
+                    if q.shape[2] == k.shape[2] and (T_q, H_q, W_q) == (T_k, H_k, W_k):
+                        # Same dimensions, apply RoPE to both
+                        q, k = rope_module(q, k, T_q, H_q, W_q, n_special=n_special_q)
+                    else:
+                        # Different dimensions after pooling, apply separately
+                        # Apply to Q
+                        q_rot, _ = rope_module(q, q, T_q, H_q, W_q, n_special=n_special_q)
+                        q = q_rot
+                        # Apply to K with its dimensions
+                        if (T_k * H_k * W_k + n_special_k) == k.shape[2]:
+                            _, k_rot = rope_module(k, k, T_k, H_k, W_k, n_special=n_special_k)
+                            k = k_rot
+                    # Log only once per training to avoid spam
+                    if not hasattr(self_attn, '_rope_applied_logged'):
+                        cls_info = f" (with {n_special_q} CLS)" if n_special_q > 0 else ""
+                        print(f"[RoPE] Applied to block with {num_heads} heads, head_dim={actual_head_dim}, grid=({T_q}x{H_q}x{W_q}){cls_info}")
+                        self_attn._rope_applied_logged = True
+                except Exception as e:
+                    # Skip RoPE for this block if error
+                    if not hasattr(self_attn, '_rope_error_logged'):
+                        print(f"[RoPE] Error in block: {e}")
+                        self_attn._rope_error_logged = True
+        
+        # Compute attention
+        # MViT uses 'scaler' not 'scale'
+        scale = 1.0 / math.sqrt(self_attn.head_dim) if hasattr(self_attn, 'head_dim') else 1.0 / math.sqrt(q.shape[-1])
+        attn = (q @ k.transpose(-2, -1)) * scale
+        
+        # Apply relative position bias (fixes DDP unused parameters)
+        if hasattr(self_attn, 'rel_pos_h') and hasattr(self_attn, 'rel_pos_w'):
+            # Use MViT's relative position bias function
+            from torchvision.models.video.mvit import _add_rel_pos
+            attn = _add_rel_pos(
+                attn,
+                q,  # Need to pass q tensor
+                thw_q,  # q dimensions  
+                thw_k,  # k dimensions
+                self_attn.rel_pos_h,
+                self_attn.rel_pos_w,
+                self_attn.rel_pos_t if hasattr(self_attn, 'rel_pos_t') else None
+            )
+        
+        attn = attn.softmax(dim=-1)
+        attn = self_attn.attn_drop(attn) if hasattr(self_attn, 'attn_drop') else attn
+        
+        # Apply to values
+        x = attn @ v  # [B, num_heads, N_q, head_dim]
+        x = x.transpose(1, 2)  # [B, N_q, num_heads, head_dim]
+        
+        # Reshape to [B, N_q, output_dim]
+        # Note: output_dim may be different from C (input dim)
+        x = x.reshape(B, x.shape[1], -1)
+        x = self_attn.project(x)  # MViT uses 'project' not 'proj'
+        
+        return x, thw_q
+    
+    # Patch all attention blocks in MViT
+    for block in model.blocks:
+        if hasattr(block, 'attn'):
+            block.attn.forward = MethodType(patched_forward, block.attn)
+
+
+class MVMHead(nn.Module):
+    """Head for Masked Video Modeling that wraps MVM functionality."""
+    
+    def __init__(self, dim_in, mvm_config):
+        super().__init__()
+        self.dim_in = dim_in
+        self.mvm_config = mvm_config
+        
+        # Create MVM module
+        self.mvm = MaskedVideoModeling(
+            hidden_size=mvm_config.get('hidden_size', dim_in),
+            decoder_hidden_size=mvm_config.get('decoder_hidden_size', 384),
+            decoder_layers=mvm_config.get('decoder_layers', 4),
+            decoder_heads=mvm_config.get('decoder_heads', 6),
+            mask_ratio=mvm_config.get('mask_ratio', 0.75),
+            mask_type=mvm_config.get('mask_type', 'random'),
+            mask_token_learnable=mvm_config.get('mask_token_learnable', True),
+            norm_predict_loss=mvm_config.get('norm_predict_loss', True),
+            use_patch_projection=mvm_config.get('use_patch_projection', True),
+            patch_size=mvm_config.get('patch_size', 16),
+            num_frames=mvm_config.get('num_frames', 16),
+            image_size=mvm_config.get('image_size', 224),
+            target_type=mvm_config.get('target_type', 'pixel'),
+            hog_config=mvm_config.get('hog_config', None),
+        )
+        
+        # Store encoder reference (will be set by model)
+        self.encoder = None
+    
+    def forward_with_encoder(self, x, encoder):
+        """Forward pass for MVM head with encoder provided.
+        
+        Args:
+            x: Video tensors [B, C, T, H, W]
+            encoder: The encoder model to use for feature extraction
+        """
+        if x.dim() != 5:
+            # Return a dummy loss for compatibility
+            return {'loss': torch.tensor(0.0, device=x.device)}
+            
+        # Pass video through MVM with encoder
+        outputs = self.mvm(x, encoder_model=encoder, mask_ratio=self.mvm_config.get('mask_ratio', 0.75))
+        
+        # The target is already set correctly inside MVM forward
+        # For feature reconstruction, it's the encoded features
+        # For patch reconstruction, it's the patchified video
+        
+        return outputs
+    
+    def forward(self, x):
+        """Forward pass for MVM head (compatibility)."""
+        # This should not be called directly when encoder is needed
+        if x.dim() != 5:
+            return {'loss': torch.tensor(0.0, device=x.device)}
+        # Return dummy outputs for compatibility
+        return {'loss': torch.tensor(0.0, device=x.device)}
+
+
 def replace_final_layer(model, config):
     """
     Replace the final layer of the model based on the problem type.
@@ -181,11 +371,82 @@ def replace_final_layer(model, config):
             raise AttributeError("Unable to determine input features for the final layer")
 
         if "mvit" in config["model_name"].lower():
-            num_classes = 1 if config["task"] == "regression" else config["num_classes"]
-            model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
-            print(
-                f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for {config['task']}"
-            )
+            if config["task"] == "regression":
+                # Check if using multi_head loss for regression
+                if config.get("loss") == "multi_head" and "head_structure" in config:
+                    # For multi-head regression, we need to output a dictionary
+                    # Create a modified MultiOutputHead that works with TransformerHead
+                    class MultiOutputTransformerHead(nn.Module):
+                        def __init__(self, dim_in, head_structure: dict[str, int], dropout=0.5):
+                            super().__init__()
+                            self.dropout = nn.Dropout(p=dropout)
+                            self.heads = nn.ModuleDict()
+                            for head_name, num_classes in head_structure.items():
+                                self.heads[head_name] = nn.Linear(dim_in, num_classes)
+                            self.head_structure = head_structure
+                        
+                        def forward(self, x):
+                            x = self.dropout(x)
+                            return {head_name: head_module(x) for head_name, head_module in self.heads.items()}
+                    
+                    model.head = MultiOutputTransformerHead(dim_in=in_features, head_structure=config["head_structure"])
+                    print(f"Replaced final layer with MultiOutputTransformerHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression")
+                else:
+                    # Single head regression
+                    model.head = TransformerHead(dim_in=in_features, num_classes=1)
+                    print(f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes=1) for regression")
+            elif config["task"] == "classification":
+                num_classes = config["num_classes"]
+                model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
+                print(f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for classification")
+            elif config["task"] == "masked_video_modeling":
+                if "mvm_config" not in config:
+                    # Default MVM configuration for MViT
+                    # MViT uses different tokenization, so use feature reconstruction
+                    config["mvm_config"] = {
+                        "hidden_size": in_features,
+                        "decoder_hidden_size": 384,
+                        "decoder_layers": 4,
+                        "decoder_heads": 6,
+                        "mask_ratio": 0.75,
+                        "mask_type": "random",
+                        "use_patch_projection": False,  # MViT doesn't use standard patches
+                        "target_type": "feature",  # Default to feature reconstruction
+                        "patch_size": 16,
+                        "num_frames": config.get("frames", 16),
+                        "image_size": config.get("resize", 224),
+                    }
+                model.head = MVMHead(dim_in=in_features, mvm_config=config["mvm_config"])
+                # Don't set encoder reference to avoid circular reference
+                # Instead, we'll pass the encoder in the forward method
+                print(f"Replaced final layer with MVMHead for masked video modeling pretraining")
+                
+                # Add get_intermediate_features method to MViT for MVM
+                from types import MethodType
+                def get_intermediate_features(self, x):
+                    """Extract intermediate features without head for MVM."""
+                    from torchvision.models.video.mvit import _unsqueeze
+                    x = _unsqueeze(x, 5, 2)[0]
+                    x = self.conv_proj(x)
+                    x = x.flatten(2).transpose(1, 2)
+                    x = self.pos_encoding(x)
+                    thw = (self.pos_encoding.temporal_size,) + self.pos_encoding.spatial_size
+                    for block in self.blocks:
+                        x, thw = block(x, thw)
+                    x = self.norm(x)
+                    return x  # Return features without head processing
+                model.get_intermediate_features = MethodType(get_intermediate_features, model)
+                
+                # Monkey-patch MViT forward for MVM
+                original_forward = model.forward
+                def mvm_forward(self, x):
+                    """MVM forward that returns MVM outputs directly."""
+                    # Pass the encoder (self) to the head
+                    return self.head.forward_with_encoder(x, self)
+                model.forward = MethodType(mvm_forward, model)
+                print("Patched MViT with get_intermediate_features and MVM forward")
+            else:
+                raise ValueError(f"Unsupported task for MViT: {config['task']}")
         elif "swin3d" in config["model_name"].lower():
             model.head = nn.Linear(
                 in_features=in_features, out_features=config["num_classes"], bias=True
@@ -244,6 +505,25 @@ def replace_final_layer(model, config):
             print(
                 f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
             )
+        elif config["task"] == "masked_video_modeling":
+            if "mvm_config" not in config:
+                # Default MVM configuration
+                config["mvm_config"] = {
+                    "hidden_size": in_features,
+                    "decoder_hidden_size": 384,
+                    "decoder_layers": 4,
+                    "decoder_heads": 6,
+                    "mask_ratio": 0.75,
+                    "mask_type": "random",
+                    "use_patch_projection": True,
+                    "patch_size": 16,
+                    "num_frames": config.get("frames", 16),
+                    "image_size": config.get("resize", 224),
+                }
+            model.blocks[-1] = MVMHead(dim_in=in_features, mvm_config=config["mvm_config"])
+            print(
+                f"Replaced final block with MVMHead for masked video modeling pretraining"
+            )
         else:
             raise ValueError(f"Unsupported task: {config['task']}")
     elif hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm):
@@ -263,6 +543,25 @@ def replace_final_layer(model, config):
             print(
                 f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
             )
+        elif config["task"] == "masked_video_modeling":
+            if "mvm_config" not in config:
+                # Default MVM configuration
+                config["mvm_config"] = {
+                    "hidden_size": in_features,
+                    "decoder_hidden_size": 384,
+                    "decoder_layers": 4,
+                    "decoder_heads": 6,
+                    "mask_ratio": 0.75,
+                    "mask_type": "random",
+                    "use_patch_projection": True,
+                    "patch_size": 16,
+                    "num_frames": config.get("frames", 16),
+                    "image_size": config.get("resize", 224),
+                }
+            model.head = MVMHead(dim_in=in_features, mvm_config=config["mvm_config"])
+            print(
+                f"Replaced final layer with MVMHead for masked video modeling pretraining"
+            )
         else:
             raise ValueError(f"Unsupported task: {config['task']}")
     else:
@@ -271,12 +570,38 @@ def replace_final_layer(model, config):
     return model
 
 
+def add_mvm_adapter_to_model(model, config):
+    """Add MVM adapter to existing model for feature extraction.
+    
+    This allows the model to output intermediate features for MVM.
+    """
+    def get_intermediate_features(self, x):
+        """Extract intermediate features for MVM."""
+        # This is a simplified version - actual implementation depends on model architecture
+        if hasattr(self, 'patch_embed'):
+            x = self.patch_embed(x)
+        elif hasattr(self, 'stem'):
+            x = self.stem(x)
+        
+        # Pass through most blocks but not the final head
+        if hasattr(self, 'blocks'):
+            for i, block in enumerate(self.blocks[:-1]):
+                x = block(x)
+        
+        return x
+    
+    # Monkey-patch the method
+    from types import MethodType
+    model.get_intermediate_features = MethodType(get_intermediate_features, model)
+    return model
+
+
 def load_and_modify_model(config):
     """
     Load a model and modify its final layer based on the configuration.
     """
-    if "num_classes" not in config and "head_structure" not in config:
-        raise ValueError("num_classes or head_structure must be defined in config")
+    if "num_classes" not in config and "head_structure" not in config and config.get("task") != "masked_video_modeling":
+        raise ValueError("num_classes, head_structure, or masked_video_modeling task must be defined in config")
     num_classes = config["num_classes"] if "num_classes" in config else 1
     resize = config.get("resize", 256)
     num_frames = config.get("frames", 64)
@@ -327,11 +652,72 @@ def load_and_modify_model(config):
 
         model = mvit_v1_b(weights="KINETICS400_V1")
         model = replace_final_layer(model, config)
+        
+        # Apply RoPE if enabled
+        if config.get("use_rope", False):
+            rope_modules = {}
+            # MViT v1 B typical configurations
+            configs = [
+                (1, 96),   # Early blocks
+                (2, 96),   # Mid blocks
+                (8, 96),   # Later blocks
+            ]
+            
+            for num_heads, head_dim in configs:
+                if head_dim % 6 == 0:  # Check 3D RoPE compatibility
+                    key = f"{num_heads}_{head_dim}"
+                    rope_module = Rope3D(
+                        embed_dim=num_heads * head_dim,
+                        num_heads=num_heads,
+                        temporal_base=config.get("rope_base", 10000.0),
+                        spatial_base=config.get("rope_base", 10000.0),
+                        temporal_scale=config.get("rope_temporal_scale", 1.0),
+                        normalize_mode=config.get("rope_normalize_mode", "separate")
+                    )
+                    # Keep RoPE in training mode to allow gradients to flow through
+                    rope_modules[key] = rope_module
+            
+            if rope_modules:
+                # Register RoPE modules as part of the model so they participate in DDP
+                model.rope_modules = nn.ModuleDict(rope_modules)
+                _patch_mvit_attention_for_rope(model, model.rope_modules)
+                print(f"Applied 3D RoPE to MViT v1 B model with configurations: {list(rope_modules.keys())}")
+    
     elif config["model_name"] == "mvit_v2_s":
         from torchvision.models.video import MViT_V2_S_Weights, mvit_v2_s
 
         model = mvit_v2_s(weights=MViT_V2_S_Weights.KINETICS400_V1)
         model = replace_final_layer(model, config)
+        
+        # Apply RoPE if enabled
+        if config.get("use_rope", False):
+            rope_modules = {}
+            # MViT v2 S typical configurations
+            configs = [
+                (1, 96),   # Blocks 0-2: 1 head, 96 dim/head
+                (2, 96),   # Blocks 3-13: 2 heads, 96 dim/head
+                (8, 96),   # Blocks 14-15: 8 heads, 96 dim/head
+            ]
+            
+            for num_heads, head_dim in configs:
+                if head_dim % 6 == 0:  # Check 3D RoPE compatibility
+                    key = f"{num_heads}_{head_dim}"
+                    rope_module = Rope3D(
+                        embed_dim=num_heads * head_dim,
+                        num_heads=num_heads,
+                        temporal_base=config.get("rope_base", 10000.0),
+                        spatial_base=config.get("rope_base", 10000.0),
+                        temporal_scale=config.get("rope_temporal_scale", 1.0),
+                        normalize_mode=config.get("rope_normalize_mode", "separate")
+                    )
+                    # Keep RoPE in training mode to allow gradients to flow through
+                    rope_modules[key] = rope_module
+            
+            if rope_modules:
+                # Register RoPE modules as part of the model so they participate in DDP
+                model.rope_modules = nn.ModuleDict(rope_modules)
+                _patch_mvit_attention_for_rope(model, model.rope_modules)
+                print(f"Applied 3D RoPE to MViT v2 S model with configurations: {list(rope_modules.keys())}")
     elif config["model_name"] == "videopairclassifier":
         if "feature_extractor_backbone" not in config:
             raise ValueError("feature_extractor_backbone must be defined")
@@ -349,4 +735,9 @@ def load_and_modify_model(config):
         )
     else:
         raise ValueError(f"Unsupported model: {config['model_name']}")
+    
+    # Add MVM adapter if using masked video modeling (skip for MViT, already handled)
+    if config.get("task") == "masked_video_modeling" and "mvit" not in config["model_name"].lower():
+        model = add_mvm_adapter_to_model(model, config)
+    
     return model

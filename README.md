@@ -4,26 +4,76 @@ Orion is a Python-based application designed for video training and evaluation t
 
 ## Setup
 
-1. Ensure you have Python 3.10 or later installed.
+### Prerequisites
 
-2. Clone the repository and navigate to the root directory.
+1. Python 3.10 or later installed
+2. UV package manager (see installation below)
+3. CUDA-compatible GPU (recommended for training)
 
-```bash
-git clone https://github.com/HeartWise-AI/Orion.git
-cd Orion
-```
+### Quick Start
 
-3. Create a new environment and install the dependencies using uv.
-
+1. **Install UV** (fast Python package manager):
    ```bash
-   python -m venv orion-venv
-   source orion-venv/bin/activate
-   pip install --upgrade pip
+   # On macOS/Linux
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   
+   # On Windows
+   powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+   
+   # Or with pip
    pip install uv
-   uv pip install -r requirements.txt
    ```
 
-4. Ensure you have an account on wandb.ai and that you've logged in using `wandb login`
+2. **Clone the repository**:
+   ```bash
+   git clone https://github.com/HeartWise-AI/Orion.git
+   cd Orion
+   ```
+
+3. **Set up virtual environment and install dependencies**:
+   ```bash
+   # Create virtual environment (uses Python 3.10 by default)
+   uv venv
+   
+   # Activate virtual environment
+   source .venv/bin/activate  # On macOS/Linux
+   # OR
+   .venv\Scripts\activate  # On Windows
+   
+   # Install dependencies
+   uv pip install -r requirements.txt
+   
+   # For development (includes testing and linting tools)
+   uv pip install -r requirements-dev.txt
+   ```
+
+4. **Configure PyTorch for your CUDA version** (if using GPU):
+   ```bash
+   # For CUDA 11.8
+   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+   
+   # For CUDA 12.1
+   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+   ```
+
+5. **Set up Weights & Biases** for experiment tracking:
+   ```bash
+   wandb login
+   ```
+
+### Alternative Setup (using pip directly)
+
+If you prefer using pip without UV:
+```bash
+python -m venv orion-venv
+source orion-venv/bin/activate  # On macOS/Linux
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### Migration from Poetry
+
+If you're migrating from an older version using Poetry, see [MIGRATION_TO_UV.md](MIGRATION_TO_UV.md) for detailed instructions
 
 ## Usage
 
@@ -81,6 +131,38 @@ When configuring your model in the YAML file, ensure that the `frames` and `resi
    ```
 
    This command runs the script in a distributed manner with 2 GPU processes on a single node.
+
+### GPU Selection
+
+You can specify which GPUs to use in multiple ways:
+
+1. **Using the --gpu flag** (Recommended):
+   ```bash
+   # Single GPU
+   torchrun --standalone --nnodes=1 --nproc-per-node=1 orion/utils/video_training_and_eval.py \
+     --config_path=notebooks/config/config.yaml --gpu 0
+
+   # Multiple GPUs
+   torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py \
+     --config_path=notebooks/config/config.yaml --gpu 0,1
+
+   # All 4 GPUs
+   torchrun --standalone --nnodes=1 --nproc-per-node=4 orion/utils/video_training_and_eval.py \
+     --config_path=notebooks/config/config.yaml --gpu 0,1,2,3
+   ```
+
+2. **Using CUDA_VISIBLE_DEVICES environment variable**:
+   ```bash
+   # Single GPU
+   CUDA_VISIBLE_DEVICES=1 torchrun --standalone --nnodes=1 --nproc-per-node=1 \
+     orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
+
+   # Multiple GPUs
+   CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nnodes=1 --nproc-per-node=2 \
+     orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
+   ```
+
+   **Note**: Make sure `--nproc-per-node` matches the number of GPUs you're using.
 
 ### Using a Jupyter Notebook
 

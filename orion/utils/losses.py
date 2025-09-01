@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional, Dict
 
 
 class Loss:
@@ -145,6 +146,8 @@ class MultiHeadLoss(nn.Module):
         gamma: float = 2.0,
         head_weights: dict[str, float] = None,
         loss_weights: dict[str, torch.Tensor] = None,
+        head_task: dict[str, str] = None,
+        task: str = "classification",
     ):
         """
         Initialize Multi-Head Loss with support for both standard and focal loss.
@@ -156,11 +159,14 @@ class MultiHeadLoss(nn.Module):
             gamma (float): Focusing parameter for focal loss (used only for focal losses)
             head_weights (dict): Optional weights for each head in the final loss computation
             loss_weights (dict): Optional dictionary mapping head names to loss weights tensor
+            head_task (dict): Optional dictionary mapping head names to task type ('classification' or 'regression')
+            task (str): Default task type if head_task is not specified
         """
         super().__init__()
         self.head_structure = head_structure
         self.head_weights = head_weights or {head: 1.0 for head in head_structure.keys()}
         self.loss_weights = loss_weights or {}
+        self.head_task = head_task or {head: task for head in head_structure.keys()}
 
         # Initialize loss functions for each head
         if loss_structure is None:
@@ -213,3 +219,68 @@ class MultiHeadLoss(nn.Module):
             total_loss += head_weight * head_loss
 
         return total_loss, losses
+
+
+@LossRegistry.register("masked_video_modeling")
+class MaskedVideoModelingLoss(Loss):
+    """
+    Loss for Masked Video Modeling pretraining.
+    
+    This loss wraps the MaskedVideoModeling module and handles the forward pass.
+    """
+    
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        decoder_hidden_size: int = 384,
+        decoder_layers: int = 4,
+        decoder_heads: int = 6,
+        mask_ratio: float = 0.75,
+        mask_type: str = "random",
+        use_patch_projection: bool = True,
+        patch_size: int = 16,
+        num_frames: int = 16,
+        image_size: int = 224,
+    ):
+        from orion.models.masked_video_modeling import MaskedVideoModeling
+        
+        self.mvm_module = MaskedVideoModeling(
+            hidden_size=hidden_size,
+            decoder_hidden_size=decoder_hidden_size,
+            decoder_layers=decoder_layers,
+            decoder_heads=decoder_heads,
+            mask_ratio=mask_ratio,
+            mask_type=mask_type,
+            use_patch_projection=use_patch_projection,
+            patch_size=patch_size,
+            num_frames=num_frames,
+            image_size=image_size,
+        )
+    
+    def __call__(
+        self, 
+        features: torch.Tensor,
+        videos: Optional[torch.Tensor] = None,
+        encoder_model: Optional[nn.Module] = None,
+        mask_ratio: Optional[float] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute MVM loss.
+        
+        Args:
+            features: Encoder features [B, N, D] or None if using videos
+            videos: Original videos [B, C, T, H, W] for patch-level reconstruction
+            encoder_model: Encoder model for feature extraction
+            mask_ratio: Optional override for mask ratio
+            
+        Returns:
+            Dictionary with loss and additional outputs
+        """
+        if videos is not None:
+            # Use videos for reconstruction target
+            outputs = self.mvm_module(videos, encoder_model, mask_ratio)
+        else:
+            # Use features directly
+            outputs = self.mvm_module(features, encoder_model, mask_ratio)
+        
+        return outputs

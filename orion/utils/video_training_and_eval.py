@@ -735,29 +735,146 @@ def run_training_or_evaluate_orchestrator(
     final_metrics = ""
     if task == "regression":
         print("Epoch logging", epoch)
-        # Flatten yhat to 1D if it's 2D
-        if yhat.ndim == 3:
-            yhat = yhat.reshape(yhat.shape[0], yhat.shape[2])  ## Converts it to 2D Array
+        
+        # Check if using multi-head structure for regression
+        head_structure = config.get("head_structure")
+        regression_thresholds = config.get("regression_head_binary_thresholds", {})
+        
+        if head_structure and config.get("loss") == "multi_head":
+            # Multi-head regression
+            mean_roc_auc_no_nan = 0
+            auc_count = 0
+            all_head_metrics = {}  # Store metrics for all heads
+            
+            for head_name in head_structure.keys():
+                if head_name in targets and head_name in predictions:
+                    y_head = np.array(targets[head_name])
+                    yhat_head = np.array(predictions[head_name])
+                    
+                    # Flatten if needed
+                    if yhat_head.ndim == 2 and yhat_head.shape[1] == 1:
+                        yhat_head = yhat_head.ravel()
+                    if y_head.ndim == 2 and y_head.shape[1] == 1:
+                        y_head = y_head.ravel()
+                    
+                    # Compute regression metrics for this head
+                    head_metrics = {}
+                    if phase in metrics:
+                        head_metrics = metrics[phase].compute()
+                        metrics[phase].reset()
+                    else:
+                        # Compute metrics manually if not available
+                        import torch
+                        from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError
+                        mae_metric = MeanAbsoluteError()
+                        mse_metric = MeanSquaredError()
+                        mae_metric.update(torch.tensor(yhat_head), torch.tensor(y_head))
+                        mse_metric.update(torch.tensor(yhat_head), torch.tensor(y_head))
+                        head_metrics = {'mae': mae_metric.compute(), 'mse': mse_metric.compute()}
+                    
+                    # Store metrics for this head
+                    all_head_metrics[head_name] = head_metrics
+                    
+                    # If a binary threshold is defined for this head, compute AUC
+                    if head_name in regression_thresholds:
+                        threshold = regression_thresholds[head_name]
+                        # Binarize targets and predictions
+                        y_binary = (y_head < threshold).astype(int)  # 1 if below threshold (abnormal)
+                        
+                        # Compute AUC using predictions as scores
+                        # Invert predictions since lower values are "positive" class
+                        from sklearn.metrics import roc_auc_score
+                        try:
+                            auc_score = roc_auc_score(y_binary, -yhat_head)  # Negative because lower is positive
+                            mean_roc_auc_no_nan += auc_score
+                            auc_count += 1
+                            print(f"[Regression AUC] Head '{head_name}' - Threshold: {threshold}, AUC: {auc_score:.4f}")
+                            
+                            if do_log:
+                                wandb.log({
+                                    f"{phase}_{head_name}_auc": auc_score,
+                                    f"{phase}_{head_name}_threshold": threshold,
+                                })
+                        except Exception as e:
+                            print(f"[Warning] Could not compute AUC for head '{head_name}': {e}")
+                    
+                    # Log regression metrics
+                    if do_log:
+                        log_regression_metrics_to_wandb(
+                            f"{phase}_{head_name}", head_metrics, average_losses.get(head_name, average_losses["main_loss"]), learning_rate
+                        )
+                        # Make sure arrays are properly formatted before passing to plot function
+                        if len(y_head) > 0 and len(yhat_head) > 0:
+                            plot_regression_graphics_and_log_binarized_to_wandb(
+                                y_head, yhat_head, f"{phase}_{head_name}", epoch, 
+                                regression_thresholds.get(head_name, config.get("binary_threshold", 40.0)), 
+                                config
+                            )
+            
+            # Average AUC across heads if any were computed
+            if auc_count > 0:
+                mean_roc_auc_no_nan = mean_roc_auc_no_nan / auc_count
+            else:
+                mean_roc_auc_no_nan = 0
+                
+            # Update best metrics using the first head's metrics (or average across heads)
+            # For now, we'll use the first head's metrics for the overall best metrics
+            if all_head_metrics:
+                first_head = list(head_structure.keys())[0]
+                if first_head in all_head_metrics and all_head_metrics[first_head]:
+                    final_metrics = all_head_metrics[first_head]
+                    if 'mae' in final_metrics and 'mse' in final_metrics:
+                        best_metrics, mae, mse, rmse = update_best_regression_metrics(
+                            final_metrics, best_metrics
+                        )
+                        print(f"[Regression Metrics] Head '{first_head}' - MAE: {mae:.4f}, RMSE: {rmse:.4f}")
+            else:
+                # Fallback: compute metrics if not already done
+                first_head = list(head_structure.keys())[0]
+                if first_head in targets and first_head in predictions:
+                    y = np.array(targets[first_head])
+                    yhat = np.array(predictions[first_head])
+                    if yhat.ndim == 2 and yhat.shape[1] == 1:
+                        yhat = yhat.ravel()
+                    if y.ndim == 2 and y.shape[1] == 1:
+                        y = y.ravel()
+                    # Compute metrics manually
+                    import torch
+                    from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError
+                    mae_metric = MeanAbsoluteError()
+                    mse_metric = MeanSquaredError()
+                    mae_metric.update(torch.tensor(yhat), torch.tensor(y))
+                    mse_metric.update(torch.tensor(yhat), torch.tensor(y))
+                    final_metrics = {'mae': mae_metric.compute(), 'mse': mse_metric.compute()}
+                    best_metrics, mae, mse, rmse = update_best_regression_metrics(
+                        final_metrics, best_metrics
+                    )
+                    print(f"[Regression Metrics Fallback] Head '{first_head}' - MAE: {mae:.4f}, RMSE: {rmse:.4f}")
+        else:
+            # Single-head regression (original logic)
+            # Flatten yhat to 1D if it's 2D
+            if yhat.ndim == 3:
+                yhat = yhat.reshape(yhat.shape[0], yhat.shape[2])  ## Converts it to 2D Array
 
-        if yhat.ndim == 2 and yhat.shape[1] == 1:
-            yhat = yhat.ravel()  # This converts it to a 1D array
+            if yhat.ndim == 2 and yhat.shape[1] == 1:
+                yhat = yhat.ravel()  # This converts it to a 1D array
 
-        final_metrics = metrics[phase].compute()
-        metrics[phase].reset()
-        auc_score = 0  # Temporary placeholder
-        mean_roc_auc_no_nan = 0  # Temporary placeholder
+            final_metrics = metrics[phase].compute()
+            metrics[phase].reset()
+            auc_score = 0  # Temporary placeholder
+            mean_roc_auc_no_nan = 0  # Temporary placeholder
 
-        if do_log:
-            log_regression_metrics_to_wandb(
-                phase, final_metrics, average_losses["main_loss"], learning_rate
-            )
-            plot_regression_graphics_and_log_binarized_to_wandb(
-                y, yhat, phase, epoch, config["binary_threshold"], config
-            )
+            if do_log:
+                log_regression_metrics_to_wandb(
+                    phase, final_metrics, average_losses["main_loss"], learning_rate
+                )
+                plot_regression_graphics_and_log_binarized_to_wandb(
+                    y, yhat, phase, epoch, config["binary_threshold"], config
+                )
 
-            best_metrics, mae, mse, rmse = update_best_regression_metrics(
-                final_metrics, best_metrics
-            )
+                best_metrics, mae, mse, rmse = update_best_regression_metrics(
+                    final_metrics, best_metrics
+                )
 
     elif task == "classification":
         # Log the aggregated loss
@@ -814,7 +931,6 @@ def run_training_or_evaluate_orchestrator(
 
     # Update and save checkpoints
     if do_log:
-        print(f"best_metrics: {best_metrics}")
         print(f"mean_roc_auc_no_nan: {mean_roc_auc_no_nan}")
         best_loss, best_auc = update_and_save_checkpoints(
             phase,
@@ -832,6 +948,7 @@ def run_training_or_evaluate_orchestrator(
         )
         best_metrics["best_loss"] = best_loss
         best_metrics["best_auc"] = best_auc
+        print(f"best_metrics (after update): {best_metrics}")
         # Generate and save prediction dataframe
         if phase == "val" and (best_metrics["best_loss"] <= average_losses["main_loss"]):
             df_predictions = format_dataframe_predictions(
@@ -932,9 +1049,27 @@ def update_and_save_checkpoints(
         print(f"[MVM] Saved epoch checkpoint: {epoch_path}")
 
     if phase == "val":
-        if task in ["regression", "masked_video_modeling"] and current_loss < best_loss:
+        if task == "regression":
+            # For regression, update both loss and AUC if available
+            if current_loss < best_loss:
+                best_loss = current_loss
+                wandb.run.summary["best_loss"] = best_loss
+                wandb.log({"best_val_loss": best_loss})
+                torch.save(save_data, best_path)
+                print(f"[Checkpoint] Saved best model with loss: {best_loss:.6f} to {best_path}")
+            
+            # Also track AUC for regression if it's computed (when binary thresholds are defined)
+            if current_auc is not None and current_auc > 0 and current_auc > best_auc:
+                best_auc = current_auc
+                wandb.run.summary["best_auc"] = best_auc
+                wandb.log({"best_val_auc": best_auc})
+                # Optionally save best model based on AUC
+                save_data["best_auc"] = best_auc
+                torch.save(save_data, best_path)
+                print(f"[Checkpoint] Updated best model with AUC: {best_auc:.4f}")
+        elif task == "masked_video_modeling" and current_loss < best_loss:
             best_loss = current_loss
-            # Log and save for regression and MVM (no AUC for these tasks)
+            # Log and save for MVM (no AUC for these tasks)
             wandb.run.summary["best_loss"] = best_loss
             torch.save(save_data, best_path)
             wandb.log({"best_val_loss": best_loss})
@@ -1597,6 +1732,9 @@ def train_or_evaluate_epoch(
                         target_label = config.get("target_label", "main")
                         outputs = {target_label: outputs}
                     
+                    # Save original outputs for prediction collection (before compute_loss modifies it)
+                    outputs_for_predictions = outputs.copy() if isinstance(outputs, dict) else outputs
+                    
                     # Log SSL visualizations if applicable
                     if task == "masked_video_modeling" and ssl_logger is not None and phase == "train":
                         # Log periodically (every N batches)
@@ -1669,7 +1807,8 @@ def train_or_evaluate_epoch(
                 # Initialize predictions and targets dictionaries for each head if not already done
                 # Skip predictions/targets for SSL tasks like masked_video_modeling
                 if task not in ["masked_video_modeling"]:
-                    for head_name in outputs.keys():
+                    # Use outputs_for_predictions which preserves the original dict structure
+                    for head_name in outputs_for_predictions.keys():
                         if head_name not in predictions:
                             predictions[head_name] = []
                         if head_name not in targets:
@@ -1677,7 +1816,7 @@ def train_or_evaluate_epoch(
 
                         # Add predictions and targets for each head
                         predictions[head_name].extend(
-                            get_predictions_during_training(outputs[head_name], task)
+                            get_predictions_during_training(outputs_for_predictions[head_name], task)
                         )
                         if outcomes is not None and head_name in outcomes:
                             targets[head_name].extend(outcomes[head_name].detach().cpu().numpy())
@@ -1726,35 +1865,75 @@ def compute_loss_and_update_metrics(
 ):
     losses = {}
     if task == "regression":
-        # 1) Instantiate the loss function
-        loss_fn = LossRegistry.create(model_loss)  # e.g. "l1", "mse"
+        # Handle multi-head loss for regression
+        if model_loss == "multi_head":
+            # Get loss structure from config
+            head_structure = config.get("head_structure", None)
+            loss_structure = config.get("loss_structure", None)
+            head_weights = config.get("head_weights", None)
+            head_task = config.get("head_task", None)
+            
+            if head_structure is None or loss_structure is None:
+                raise ValueError("head_structure and loss_structure must be defined for multi-head regression")
+            
+            # Create MultiHeadLoss with proper parameters
+            from orion.utils.losses import MultiHeadLoss
+            loss_fn = MultiHeadLoss(
+                head_structure=head_structure,
+                loss_structure=loss_structure,
+                head_weights=head_weights,
+                head_task=head_task,
+                task=task
+            )
+            
+            # Ensure outcomes have the correct dtype (float32)
+            for head_name in outcomes:
+                if outcomes[head_name].dtype == torch.float64:
+                    outcomes[head_name] = outcomes[head_name].float()
+            
+            # Compute loss (MultiHeadLoss expects dicts)
+            total_loss, individual_losses = loss_fn(outputs, outcomes)
+            losses["main_loss"] = total_loss
+            losses.update(individual_losses)  # Add individual losses for logging
+            
+            # Update metrics for each head
+            if phase in metrics:
+                for head_name in outputs.keys():
+                    if head_name in outcomes:
+                        head_outputs = outputs[head_name].view(-1)
+                        head_targets = outcomes[head_name].view(-1)
+                        metrics[phase].update(head_outputs, head_targets)
+        else:
+            # Original single-head regression logic
+            # 1) Instantiate the loss function
+            loss_fn = LossRegistry.create(model_loss)  # e.g. "l1", "mse"
 
-        # 2) Unwrap the single tensor if model returns { "Value": tensor(...) }
-        if isinstance(outputs, dict):
-            if len(outputs) == 1:
-                # Extract the single key's tensor
-                outputs = next(iter(outputs.values()))
-            else:
-                raise ValueError("Expected 1 key in `outputs` for regression, found multiple!")
+            # 2) Unwrap the single tensor if model returns { "Value": tensor(...) }
+            if isinstance(outputs, dict):
+                if len(outputs) == 1:
+                    # Extract the single key's tensor
+                    outputs = next(iter(outputs.values()))
+                else:
+                    raise ValueError("Expected 1 key in `outputs` for regression, found multiple!")
 
-        # If your targets are also a dict, unwrap them as well
-        if isinstance(outcomes, dict):
-            if len(outcomes) == 1:
-                outcomes = next(iter(outcomes.values()))
-            else:
-                raise ValueError("Expected 1 key in `outcomes` for regression, found multiple!")
+            # If your targets are also a dict, unwrap them as well
+            if isinstance(outcomes, dict):
+                if len(outcomes) == 1:
+                    outcomes = next(iter(outcomes.values()))
+                else:
+                    raise ValueError("Expected 1 key in `outcomes` for regression, found multiple!")
 
-        # 3) Now `outputs` and `outcomes` are both Tensors.
-        #    Reshape if needed (often necessary if shape is [B,1] or [B, ...]).
-        outputs = outputs.view(-1)
-        outcomes = outcomes.view(-1)
+            # 3) Now `outputs` and `outcomes` are both Tensors.
+            #    Reshape if needed (often necessary if shape is [B,1] or [B, ...]).
+            outputs = outputs.view(-1)
+            outcomes = outcomes.view(-1)
 
-        # 4) Finally compute the loss
-        loss = loss_fn(outputs, outcomes)
+            # 4) Finally compute the loss
+            loss = loss_fn(outputs, outcomes)
 
-        losses["main_loss"] = loss
-        # Update regression metrics (already done in your code)
-        metrics[phase].update(outputs, outcomes)
+            losses["main_loss"] = loss
+            # Update regression metrics (already done in your code)
+            metrics[phase].update(outputs, outcomes)
 
     elif task == "classification":
         # For multi-head loss, outputs and outcomes should be dictionaries
@@ -2093,9 +2272,18 @@ def _add_targets_if_present(df_predictions, targets, head_name):
 
 def _add_regression_predictions(df_predictions, predictions, targets):
     """Add regression predictions and targets to DataFrame."""
-    df_predictions["pred"] = predictions
-    if targets is not None:
-        df_predictions["target"] = targets
+    # Handle dict predictions for regression (single-head case)
+    if isinstance(predictions, dict) and len(predictions) == 1:
+        # Extract the single key's values
+        key = next(iter(predictions.keys()))
+        df_predictions["pred"] = predictions[key]
+        if targets and isinstance(targets, dict) and key in targets:
+            df_predictions["target"] = targets[key]
+    else:
+        # Original behavior for non-dict predictions
+        df_predictions["pred"] = predictions
+        if targets is not None:
+            df_predictions["target"] = targets
 
 
 def save_predictions_to_csv(df_predictions, config, split, epoch):

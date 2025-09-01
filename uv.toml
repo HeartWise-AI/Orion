@@ -1,0 +1,15 @@
+# UV Configuration for Orion Project
+
+# Development settings
+preview = true
+python-preference = "managed"
+compile-bytecode = true
+
+# Virtual environment settings
+[pip]
+index-url = "https://pypi.org/simple"
+extra-index-url = ["https://download.pytorch.org/whl/cu118"]
+index-strategy = "unsafe-best-match"  # Allow packages from any index
+
+# Resolution strategy
+resolution = "highest"

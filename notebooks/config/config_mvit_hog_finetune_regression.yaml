@@ -4,12 +4,12 @@
 # Training parameters
 num_epochs: !!int 30
 model_name: !!str mvit_v2_s
-data_filename: !!str /media/data1/datasets/CathEF/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days.csv
+data_filename: !!str data/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days_sample_400.csv
 output_dir: !!str "outputs_mvit_hog_finetune_regression"
 root: !!str "."
 datapoint_loc_label: !!str FileName
-label_loc_label: !!null null  # Not used for single-head regression
-target_label: Value  # Continuous LVEF value column for regression
+label_loc_label: [Value]  # List format for multi-head (even with single head)
+target_label: !!null null  # Not used when label_loc_label is set
 binary_threshold: !!float 40.0  # For metrics computation
 device: !!str cuda
 seed: !!int 42
@@ -20,10 +20,31 @@ pretrained: !!bool false  # Don't load ImageNet weights
 checkpoint_path: !!str "outputs_mvm_pretrain/mvit_v2_s_8_16_2_AdamW_new_20250826-233853_wsr2fciq/best.pt"
 load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
 
-# Task configuration - regression for LVEF
-task: !!str regression
-loss: !!str mse  # MSE loss for regression
+# Task configuration - default task type (can be overridden per head)
+task: !!str regression  # Global default task (used if head_task not specified)
+loss: !!str multi_head  # Multi-head loss framework
 num_classes: !!int 1  # Single output for regression
+
+# Head structure configuration (single regression head)
+head_structure:
+  Value: !!int 1  # Single regression output
+
+# Head task configuration (specify task type for each head)
+head_task:
+  Value: !!str regression  # This head is for regression
+
+# Loss structure configuration  
+loss_structure:
+  Value: !!str mse  # MSE loss for regression (can also use 'l1' for MAE)
+
+# Head weights configuration
+head_weights:
+  Value: !!float 1.0
+
+# Regression head binary thresholds for AUC calculation
+# Used to binarize continuous predictions for computing classification metrics
+regression_head_binary_thresholds:
+  Value: !!float 40.0  # Threshold for LVEF (< 40% is reduced ejection fraction)
 
 # MViT specific parameters
 frames: !!int 16  # MViT requires 16 frames
@@ -37,7 +58,7 @@ std: [39.012229919433594, 39.012229919433594, 39.012229919433594]
 optimizer: !!str AdamW
 weight_decay: !!float 0.05
 betas: [0.9, 0.999]
-num_workers: !!int 8
+num_workers: !!int 4
 batch_size: !!int 4  # Adjust based on GPU memory
 lr: !!float 0.00005  # Lower learning rate for fine-tuning
 
@@ -100,9 +121,9 @@ save_checkpoint_every_n_epochs: !!int 5
 
 # Evaluation metrics for regression
 metrics_control:
-  optim_thresh: !!str rmse  # Use RMSE for regression
-  plot_pred_distribution: !!bool true
-  plot_metrics_moving_thresh: !!bool false  # Not applicable for regression
+  optim_thresh: !!str g_mean  # Binary metric for dichotomizing at threshold (g_mean = geometric mean of sensitivity and specificity)
+  plot_pred_distribution: !!bool true  # Enable to analyze binarized predictions at threshold
+  plot_metrics_moving_thresh: !!bool false  # Set to true if you want to see threshold optimization plots
   n_bootstrap: !!int 100
   q_bootstrap: !!float 0.05
 
@@ -111,7 +132,7 @@ save_strategy: !!str best
 keep_last_n_checkpoints: !!int 3
 
 # Distributed training
-distributed: !!bool true
+distributed: !!bool false
 backend: !!str nccl
 find_unused_parameters: !!bool true  # Needed for RoPE
 

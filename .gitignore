@@ -12,11 +12,25 @@ wandb/
 DeepQCA_videos/
 CathEF-data/
 df_angle_object_rca_lca_filtered/
-wandb/
 exported_videos_512_by_512_MHI_UCSF/
 .idea/
 Denis_CathEF_PredictionInvestigation/
-orion-venv
+orion-venv/
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# UV specific
+.uv/
+.uv-cache/
+uv.lock
+
+# Poetry (legacy - can be removed after migration)
+poetry.lock
 
 # Ignore specific file types
 *.swp
