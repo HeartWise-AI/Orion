@@ -1,36 +1,38 @@
 program:
   orion/utils/video_training_and_eval.py
-name: "1_CathEF_UCSF_MHI_2021_Retrain_15_fps_ddp"
+name: "CathEF_Optimized_Sweep"
 method: "bayes" # grid, random
 metric:
   name: "best_val_loss"
   goal: "minimize"
 parameters:
   model_name:
-    values: ["swin3d_s"]
+    values: ["mvit_v2_s"]  # Added x3d_m and mvit_v2_s
   lr:
     distribution: "uniform"
-    min: 1e-8
-    max: 2e-5
+    min: 0.00001
+    max: 0.00005  # Narrowed range around proven value 2.78e-5
   rand_augment:
     values: [True, False]
   scheduler_type:
-    values: ["plateau", "step", "cosine_warm_restart"]
+    values: ["cosine_warm_restart", "cosine", "step"]  # cosine_warm_restart first (proven best)
   optimizer:
-    values: ["AdamW", "RAdam"]
+    values: ["AdamW"]  # AdamW proven to work best
   weight_decay:
-    min: 0.0  # explicitly a float
-    max: 0.00001  # explicitly a float, equivalent to 1e-3
-  patience:
-    min: 5
-    max: 15
-  factor:
-    values: [0.3, 0.5]
+    distribution: "uniform"
+    min: 0.0001  # Around proven value 3.84e-4
+    max: 0.0005
+  batch_size:
+    values: [12, 16, 24]  # 6 is proven, but test nearby values
+  gradient_accumulation_steps:
+    values: [2, 4]  # For effective batch size management
+  period:
+    values: [1, 2, 3]
 early_terminate:
   type: hyperband
-  min_iter: 3    
+  min_iter: 5  # Increased from 3 to allow more training
 command:
-  - notebooks/config/runner.sh
+  - notebooks/config/runner_sweep.sh
   - ${program}
-  - "notebooks/config/config_x3d_multi_output_classification_train.yaml"
+  - "notebooks/config/config_x3d_debug_binary_classification.yaml"
   - ${args}

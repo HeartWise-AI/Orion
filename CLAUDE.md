@@ -162,4 +162,59 @@ The codebase is designed for distributed training using PyTorch's DistributedDat
 - Pre-commit hooks automatically format code - let them run before committing
 - The framework validates model configurations at runtime (e.g., frame counts for specific models)
 - When modifying models, use the existing head replacement logic in `orion/models/__init__.py`
-- Always actiave venv with source .venv/bin/activate
+- Always activate venv with source .venv/bin/activate
+
+## Model Head Architecture
+
+### Classification vs Regression Heads
+The framework uses different head architectures for classification and regression tasks:
+
+1. **ClassificationHead** (`orion/models/__init__.py`):
+   - Uses Conv3d (dim_in → 512) with BatchNorm3d
+   - Includes ReLU activation and Dropout3d(0.5)
+   - Proper initialization for classification tasks
+   - Used when `head_task[head_name] = 'classification'`
+
+2. **SimpleRegressionHead** (`orion/models/__init__.py`):
+   - Uses Conv3d (dim_in → 512) with BatchNorm1d
+   - Includes ReLU activation and Dropout(0.5)
+   - Bias initialized near mean LVEF (30.0)
+   - Used when `head_task[head_name] = 'regression'`
+
+### Working Hyperparameters for X3D Models
+Based on empirical testing, these parameters work well with x3d_m:
+
+```yaml
+# Optimizer configuration
+optimizer: AdamW
+weight_decay: 0.0003845182987994549  # Much lower than default 0.05
+lr: 0.00002786988178725705  # ~2.8e-5
+batch_size: 6-16  # Depending on GPU memory
+
+# Scheduler
+scheduler_type: cosine_warm_restart  # Better than plain cosine
+
+# Loss functions
+- Classification: bce_with_logits (binary), cross_entropy (multi-class)
+- Regression: l1 (more stable than mse for LVEF values)
+
+# Data normalization
+mean: [120.905205, 120.905205, 120.905205]  # Dataset-specific
+std: [40.97189, 40.97189, 40.97189]  # Dataset-specific
+```
+
+### Common Issues and Fixes
+
+1. **Exploding loss with x3d models**: 
+   - Caused by using RegressionHead for classification
+   - Fixed by creating separate ClassificationHead with proper architecture
+
+2. **KeyError for labels**: 
+   - Use `y_true_cat` column for binary classification (0/1 values)
+   - Use `Value` column for regression (continuous LVEF values)
+   - Always define `labels_map` even for numeric columns
+
+3. **Missing config fields**:
+   - `apply_mask`: defaults to False
+   - `weighted_sampling`: defaults to False
+   - Always check required fields in `load_dataset()`

@@ -113,11 +113,72 @@ class RegressionHead(nn.Module):
         super().__init__()
         self.fc1 = nn.Conv3d(dim_in, 2048, bias=True, kernel_size=1, stride=1)
         self.regress = nn.Linear(2048, num_classes)
+        
+        # Initialize weights properly for regression
+        nn.init.kaiming_normal_(self.fc1.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.fc1.bias, 0)
+        nn.init.xavier_uniform_(self.regress.weight)
+        nn.init.constant_(self.regress.bias, 0)
 
     def forward(self, x):
         x = self.fc1(x)
+        x = F.relu(x)  # Add activation
         x = x.mean([2, 3, 4])
         x = self.regress(x)
+        return x
+
+
+class SimpleRegressionHead(nn.Module):
+    """Simpler regression head for better stability."""
+    def __init__(self, dim_in, num_classes=1):
+        super().__init__()
+        # Much smaller intermediate dimension
+        self.fc1 = nn.Conv3d(dim_in, 512, bias=True, kernel_size=1, stride=1)
+        self.bn = nn.BatchNorm1d(512)
+        self.dropout = nn.Dropout(0.5)
+        self.regress = nn.Linear(512, num_classes)
+        
+        # Proper initialization
+        nn.init.kaiming_normal_(self.fc1.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.fc1.bias, 0)
+        nn.init.xavier_uniform_(self.regress.weight, gain=0.01)  # Small gain for regression
+        nn.init.constant_(self.regress.bias, 30.0)  # Initialize near mean LVEF
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = x.mean([2, 3, 4])  # Global average pooling
+        x = self.bn(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.regress(x)
+        return x
+
+
+class ClassificationHead(nn.Module):
+    """Proper classification head for X3D models."""
+    def __init__(self, dim_in, num_classes=1):
+        super().__init__()
+        # Smaller intermediate dimension for stability
+        self.fc1 = nn.Conv3d(dim_in, 512, kernel_size=1, stride=1, bias=False)
+        self.bn1 = nn.BatchNorm3d(512)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout3d(0.5)
+        self.fc2 = nn.Conv3d(512, num_classes, kernel_size=1, stride=1, bias=True)
+        
+        # Better initialization for classification
+        nn.init.kaiming_normal_(self.fc1.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.normal_(self.fc2.weight, mean=0, std=0.01)
+        nn.init.constant_(self.fc2.bias, 0)
+    
+    def forward(self, x):
+        # Conv3d expects [B, C, T, H, W]
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        # Global average pooling
+        x = x.mean([2, 3, 4])
         return x
 
 
@@ -134,8 +195,23 @@ class TransformerHead(nn.Module):
         return x
 
 
+class MultiOutputTransformerHead(nn.Module):
+    """Multi-output head for Transformer models like MViT."""
+    def __init__(self, dim_in, head_structure: dict[str, int], dropout=0.5):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.heads = nn.ModuleDict()
+        for head_name, num_classes in head_structure.items():
+            self.heads[head_name] = nn.Linear(dim_in, num_classes)
+        self.head_structure = head_structure
+    
+    def forward(self, x):
+        x = self.dropout(x)
+        return {head_name: head_module(x) for head_name, head_module in self.heads.items()}
+
+
 class MultiOutputHead(nn.Module):
-    def __init__(self, dim_in, head_structure: dict[str, int]):
+    def __init__(self, dim_in, head_structure: dict[str, int], head_task: dict[str, str] = None):
         """
         Initialize a multi-output head with different number of classes per head.
 
@@ -143,14 +219,26 @@ class MultiOutputHead(nn.Module):
             dim_in (int): Input dimension
             head_structure (dict[str, int]): Dictionary mapping head names to their number of output classes
                 e.g. {"contrast_agent": 1, "main_structure": 5, "stent_presence": 1}
+            head_task (dict[str, str]): Optional dictionary mapping head names to task types ('classification' or 'regression')
         """
         super().__init__()
         self.dropout = nn.Dropout(p=0.5)
         self.heads = nn.ModuleDict()
+        self.head_task = head_task or {}
+        
         for head_name, num_classes in head_structure.items():
             if not isinstance(num_classes, int) or num_classes < 1:
                 raise ValueError(f"Invalid number of classes for head {head_name}: {num_classes}")
-            self.heads[head_name] = nn.Sequential(RegressionHead(dim_in, num_classes))
+            
+            # Check if this head is for regression or classification
+            task_type = self.head_task.get(head_name, 'classification')
+            
+            if task_type == 'regression':
+                # Use SimpleRegressionHead for regression tasks (more stable)
+                self.heads[head_name] = SimpleRegressionHead(dim_in, num_classes)
+            else:
+                # For classification, use proper ClassificationHead
+                self.heads[head_name] = ClassificationHead(dim_in, num_classes)
 
         self.head_structure = head_structure
 
@@ -374,31 +462,32 @@ def replace_final_layer(model, config):
             if config["task"] == "regression":
                 # Check if using multi_head loss for regression
                 if config.get("loss") == "multi_head" and "head_structure" in config:
-                    # For multi-head regression, we need to output a dictionary
-                    # Create a modified MultiOutputHead that works with TransformerHead
-                    class MultiOutputTransformerHead(nn.Module):
-                        def __init__(self, dim_in, head_structure: dict[str, int], dropout=0.5):
-                            super().__init__()
-                            self.dropout = nn.Dropout(p=dropout)
-                            self.heads = nn.ModuleDict()
-                            for head_name, num_classes in head_structure.items():
-                                self.heads[head_name] = nn.Linear(dim_in, num_classes)
-                            self.head_structure = head_structure
-                        
-                        def forward(self, x):
-                            x = self.dropout(x)
-                            return {head_name: head_module(x) for head_name, head_module in self.heads.items()}
-                    
-                    model.head = MultiOutputTransformerHead(dim_in=in_features, head_structure=config["head_structure"])
+                    # For multi-head regression with MViT, use MultiOutputTransformerHead
+                    model.head = MultiOutputTransformerHead(
+                        dim_in=in_features, 
+                        head_structure=config["head_structure"],
+                        dropout=0.5
+                    )
                     print(f"Replaced final layer with MultiOutputTransformerHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression")
                 else:
                     # Single head regression
                     model.head = TransformerHead(dim_in=in_features, num_classes=1)
                     print(f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes=1) for regression")
             elif config["task"] == "classification":
-                num_classes = config["num_classes"]
-                model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
-                print(f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for classification")
+                # Check if using multi_head loss for classification
+                if config.get("loss") == "multi_head" and "head_structure" in config:
+                    # For multi-head classification with MViT, use MultiOutputTransformerHead
+                    model.head = MultiOutputTransformerHead(
+                        dim_in=in_features, 
+                        head_structure=config["head_structure"],
+                        dropout=0.5
+                    )
+                    print(f"Replaced final layer with MultiOutputTransformerHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head classification")
+                else:
+                    # Single head classification
+                    num_classes = config["num_classes"]
+                    model.head = TransformerHead(dim_in=in_features, num_classes=num_classes)
+                    print(f"Replaced final layer with TransformerHead(dim_in={in_features}, num_classes={num_classes}) for classification")
             elif config["task"] == "masked_video_modeling":
                 if "mvm_config" not in config:
                     # Default MVM configuration for MViT
@@ -456,17 +545,32 @@ def replace_final_layer(model, config):
             )
         else:
             if config["task"] == "regression":
-                model.head = RegressionHead(dim_in=in_features, num_classes=1)
-                print(
-                    f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
-                )
+                # Check if using multi_head loss for regression
+                if config.get("loss") == "multi_head" and "head_structure" in config:
+                    # For multi-head regression with x3d, create MultiOutputHead
+                    model.head = MultiOutputHead(
+                        dim_in=in_features, 
+                        head_structure=config["head_structure"],
+                        head_task=config.get("head_task", {})
+                    )
+                    print(
+                        f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression"
+                    )
+                else:
+                    # Single head regression
+                    model.head = RegressionHead(dim_in=in_features, num_classes=1)
+                    print(
+                        f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+                    )
             elif config["task"] == "classification":
                 if "head_structure" not in config:
                     raise ValueError(
                         "head_structure must be defined in config for multi_head task"
                     )
                 model.head = MultiOutputHead(
-                    dim_in=in_features, head_structure=config["head_structure"]
+                    dim_in=in_features, 
+                    head_structure=config["head_structure"],
+                    head_task=config.get("head_task", {})
                 )
                 print(
                     f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
@@ -492,15 +596,30 @@ def replace_final_layer(model, config):
 
         # Replace the last block with the appropriate head based on the task
         if config["task"] == "regression":
-            model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
-            print(
-                f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
-            )
+            # Check if using multi_head loss for regression
+            if config.get("loss") == "multi_head" and "head_structure" in config:
+                # For multi-head regression, create MultiOutputHead
+                model.blocks[-1] = MultiOutputHead(
+                    dim_in=in_features, 
+                    head_structure=config["head_structure"],
+                    head_task=config.get("head_task", {})
+                )
+                print(
+                    f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression"
+                )
+            else:
+                # Single head regression
+                model.blocks[-1] = RegressionHead(dim_in=in_features, num_classes=1)
+                print(
+                    f"Replaced final block with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+                )
         elif config["task"] == "classification":
             if "head_structure" not in config:
                 raise ValueError("head_structure must be defined in config for multi_head task")
             model.blocks[-1] = MultiOutputHead(
-                dim_in=in_features, head_structure=config["head_structure"]
+                dim_in=in_features, 
+                head_structure=config["head_structure"],
+                head_task=config.get("head_task", {})
             )
             print(
                 f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
@@ -530,15 +649,30 @@ def replace_final_layer(model, config):
         in_features = model.head[1].in_features
 
         if config["task"] == "regression":
-            model.head = RegressionHead(dim_in=in_features, num_classes=1)
-            print(
-                f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
-            )
+            # Check if using multi_head loss for regression
+            if config.get("loss") == "multi_head" and "head_structure" in config:
+                # For multi-head regression, create MultiOutputHead
+                model.head = MultiOutputHead(
+                    dim_in=in_features, 
+                    head_structure=config["head_structure"],
+                    head_task=config.get("head_task", {})
+                )
+                print(
+                    f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression"
+                )
+            else:
+                # Single head regression
+                model.head = RegressionHead(dim_in=in_features, num_classes=1)
+                print(
+                    f"Replaced final layer with RegressionHead(dim_in={in_features}, num_classes=1) for regression"
+                )
         elif config["task"] == "classification":
             if "head_structure" not in config:
                 raise ValueError("head_structure must be defined in config for multi_head task")
             model.head = MultiOutputHead(
-                dim_in=in_features, head_structure=config["head_structure"]
+                dim_in=in_features, 
+                head_structure=config["head_structure"],
+                head_task=config.get("head_task", {})
             )
             print(
                 f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
@@ -686,7 +820,50 @@ def load_and_modify_model(config):
     elif config["model_name"] == "mvit_v2_s":
         from torchvision.models.video import MViT_V2_S_Weights, mvit_v2_s
 
-        model = mvit_v2_s(weights=MViT_V2_S_Weights.KINETICS400_V1)
+        # Load base model
+        if config.get("pretrained", True):
+            model = mvit_v2_s(weights=MViT_V2_S_Weights.KINETICS400_V1)
+        else:
+            model = mvit_v2_s(weights=None)
+        
+        # Load from checkpoint if specified
+        if config.get("checkpoint_path"):
+            checkpoint_path = config["checkpoint_path"]
+            print(f"Loading checkpoint from: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            
+            # Handle MVM pretraining checkpoint
+            if config.get("load_mvm_encoder_only", False):
+                # MVM checkpoint has 'model_state_dict' with encoder weights
+                if "model_state_dict" in checkpoint:
+                    state_dict = checkpoint["model_state_dict"]
+                else:
+                    state_dict = checkpoint
+                
+                # Filter out MVM-specific layers (decoder, etc.)
+                encoder_state_dict = {}
+                for k, v in state_dict.items():
+                    # Skip MVM decoder and head layers
+                    if not any(skip in k for skip in ["decoder", "mvm_head", "mask_token"]):
+                        # Remove 'module.' prefix if present (from DDP)
+                        key = k.replace("module.", "")
+                        encoder_state_dict[key] = v
+                
+                # Load encoder weights
+                missing_keys, unexpected_keys = model.load_state_dict(encoder_state_dict, strict=False)
+                print(f"Loaded MVM encoder weights from checkpoint")
+                if missing_keys:
+                    print(f"Missing keys: {missing_keys[:5]}..." if len(missing_keys) > 5 else f"Missing keys: {missing_keys}")
+                if unexpected_keys:
+                    print(f"Unexpected keys: {unexpected_keys[:5]}..." if len(unexpected_keys) > 5 else f"Unexpected keys: {unexpected_keys}")
+            else:
+                # Regular checkpoint loading
+                if "model_state_dict" in checkpoint:
+                    model.load_state_dict(checkpoint["model_state_dict"])
+                else:
+                    model.load_state_dict(checkpoint)
+                print(f"Loaded full model weights from checkpoint")
+        
         model = replace_final_layer(model, config)
         
         # Apply RoPE if enabled

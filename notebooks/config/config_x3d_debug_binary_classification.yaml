@@ -1,0 +1,122 @@
+# X3D-M Debug Binary Classification Configuration
+# Use Outcome column (0/1) for debugging training issues
+
+# Training parameters
+num_epochs: !!int 25
+model_name: !!str mvit_v2_s
+data_filename: !!str data/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days_sample_400.csv
+output_dir: !!str "outputs_x3d_debug_binary"
+root: !!str "."
+datapoint_loc_label: !!str FileName
+label_loc_label: [y_true_cat, Value]  # Using binary Outcome column
+binary_threshold: !!float 0.5
+device: !!str cuda
+seed: !!int 42
+resume: !!bool false  # Not resuming, loading from MVM checkpoint instead
+
+# Load pretrained weights
+pretrained: !!bool true
+checkpoint_path: !!str "outputs_mvm_pretrain/mvit_v2_s_8_16_2_AdamW_new_20250826-233853_wsr2fciq/checkpoint.pt"
+load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
+
+# 3D RoPE Configuration (enabled for MViT)
+use_rope: !!bool true
+rope_base: !!float 10000.0
+rope_temporal_scale: !!float 1.0
+rope_normalize_mode: !!str separate
+# Task configuration - classification
+task: !!str classification
+loss: !!str multi_head
+num_classes: !!int 1  # Binary classification
+
+# Head structure configuration
+head_structure:
+  y_true_cat: !!int 1  # Binary classification
+  Value: !!int 1  # Regression - single output dimension
+
+# Head task configuration
+head_task:
+  y_true_cat: !!str classification
+  Value: !!str regression
+
+# Loss structure configuration
+loss_structure:
+  y_true_cat: !!str bce_logit
+  Value: !!str l1
+
+# Head weights configuration
+head_weights:
+  y_true_cat: !!float 1.0
+  Value: !!float 1.0
+
+frames: !!int 16  
+resize: !!int 224
+period: !!int 2
+view_count: !!int 1
+mean: [120.905205, 120.905205, 120.905205]
+std: [40.97189, 40.97189, 40.97189]
+
+# Optimizer configuration
+optimizer: !!str AdamW
+weight_decay: !!float 0.0003845182987994549  # Proven working value
+num_workers: !!int 8
+batch_size: !!int 16 
+lr: !!float 0.00002786988178725705  # Proven working learning rate
+
+# Learning rate scheduler
+scheduler_type: !!str cosine_warm_restart  # Better scheduler
+warmup_epochs: !!int 2
+min_lr: !!float 0.000001
+
+# Mixed precision and gradient
+use_amp: !!bool true
+gradient_accumulation_steps: !!int 4
+gradient_clip_val: !!float 1.0
+
+# Data augmentation (minimal for debugging)
+augment: !!bool false
+crop_size: !!int 224
+horizontal_flip_prob: !!float 0.0
+vertical_flip_prob: !!float 0.0
+
+# Validation parameters
+val_split: !!float 0.2
+eval_every_n_epochs: !!int 1
+save_best_model: !!bool true
+save_best: !!str loss
+early_stopping_patience: !!int 5
+
+# Logging
+project: !!str "orion-x3d-debug-binary"
+entity: !!str "mhi_ai"
+tag: !!str "x3d_debug_binary_classification"
+log_interval: !!int 20
+
+# Evaluation metrics
+metrics_control:
+  optim_thresh: !!str g_mean
+  plot_pred_distribution: !!bool true
+  plot_metrics_moving_thresh: !!bool false
+  n_bootstrap: !!int 100
+  q_bootstrap: !!float 0.05
+
+# Model saving
+save_strategy: !!str best
+keep_last_n_checkpoints: !!int 3
+
+# Distributed training
+backend: !!str nccl
+
+# Memory optimization
+pin_memory: !!bool true
+persistent_workers: !!bool true
+
+# Sampling
+weighted_sampling: !!bool false
+
+# Label mappings - classification needs mapping, regression doesn't
+labels_map:
+  y_true_cat:
+    0: !!int 0
+    1: !!int 1
+  Value: !!null null  # Null for regression column

@@ -122,7 +122,11 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     # initialize PyTorch distributed using environment variables with explicit device_id
     # This fixes the warning about GPU mapping
     torch.cuda.set_device(device)
-    dist.init_process_group(backend="nccl", init_method="env://", device_id=device)
+    
+    # Only initialize process group if not already initialized (may be initialized in sweep mode)
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl", init_method="env://", device_id=device)
+    
     is_main_process = dist.get_rank() == 0
     print("is main process", is_main_process)
 
@@ -199,8 +203,8 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         scheduler.load_state_dict(sched_state)
 
     ## Data loader
-    train_dataset = load_dataset("train", config, transforms, config["weighted_sampling"])
-    val_dataset = load_dataset("val", config, transforms, config["weighted_sampling"])
+    train_dataset = load_dataset("train", config, transforms, config.get("weighted_sampling", False))
+    val_dataset = load_dataset("val", config, transforms, config.get("weighted_sampling", False))
 
     # Simplified DataLoader setup
     def create_dataloader(dataset, sampler_type, batch_size, num_workers, pin_memory, drop_last):
@@ -260,11 +264,21 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         if head_structure is None:
             raise ValueError("head_structure must be specified in config for multi-head loss")
 
-        # Initialize metrics for each head
+        # Get head_task to determine which heads are classification vs regression
+        head_task = config.get("head_task", {})
+        
+        # Initialize metrics for each head based on its task type
         metrics = {phase: {} for phase in ["train", "val", "test"]}
         for phase in metrics:
             for head_name, num_classes in head_structure.items():
-                metrics[phase][head_name] = initialize_classification_metrics(num_classes, device)
+                # Determine task type for this head (default to classification for backward compatibility)
+                task_type = head_task.get(head_name, "classification")
+                
+                if task_type == "classification":
+                    metrics[phase][head_name] = initialize_classification_metrics(num_classes, device)
+                elif task_type == "regression":
+                    # For regression heads, initialize a simple dict to store predictions and targets
+                    metrics[phase][head_name] = {"predictions": [], "targets": []}
     elif config["task"] == "masked_video_modeling":
         # For MVM/SSL pretraining, we track reconstruction loss
         weights = None
@@ -369,7 +383,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 scheduler.step()
                 print(f"[Scheduler] Stepped {scheduler_type} scheduler at epoch {epoch}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    if config["run_test"]:
+    if config.get("run_test", False):
         # Clean up
         dist.destroy_process_group()
 
@@ -883,14 +897,44 @@ def run_training_or_evaluate_orchestrator(
 
         # Handle multi-head metrics
         head_structure = config.get("head_structure")
+        head_task = config.get("head_task", {})
         final_metrics = {}
         mean_roc_auc_no_nan = 0
         total_heads = len(head_structure)
+        auc_count = 0  # Track number of heads with AUC metrics
 
         for head_name, num_classes in head_structure.items():
             y = np.array(targets[head_name])
             yhat = np.array(predictions[head_name])
-            if num_classes <= 2:
+            
+            # Determine task type for this head
+            task_type = head_task.get(head_name, "classification")
+            
+            if task_type == "regression":
+                # Regression head - compute regression metrics
+                from sklearn.metrics import mean_absolute_error, mean_squared_error
+                mae = mean_absolute_error(y, yhat)
+                mse = mean_squared_error(y, yhat)
+                rmse = np.sqrt(mse)
+                
+                if do_log:
+                    wandb.log({
+                        f"{phase}_{head_name}_mae": mae,
+                        f"{phase}_{head_name}_mse": mse,
+                        f"{phase}_{head_name}_rmse": rmse,
+                        f"{phase}_{head_name}_loss": average_losses.get(head_name, 0),
+                    })
+                
+                # Store metrics for this head
+                head_metrics = {"mae": mae, "mse": mse, "rmse": rmse}
+                
+                # Update best metrics for regression heads
+                if phase == "val":
+                    if "best_mae" not in best_metrics or mae < best_metrics["best_mae"]:
+                        best_metrics["best_mae"] = mae
+                    if "best_rmse" not in best_metrics or rmse < best_metrics["best_rmse"]:
+                        best_metrics["best_rmse"] = rmse
+            elif num_classes <= 2:
                 # Binary classification for this head]
                 head_metrics = compute_classification_metrics(metrics[phase][head_name])
                 optimal_thresh = compute_optimal_threshold(y, yhat)
@@ -907,6 +951,7 @@ def run_training_or_evaluate_orchestrator(
                         learning_rate=learning_rate,
                     )
                 mean_roc_auc_no_nan += head_metrics["auc"]
+                auc_count += 1
             else:
                 # Multi-class classification for this head
                 head_metrics = compute_multiclass_metrics(metrics[phase][head_name])
@@ -923,11 +968,13 @@ def run_training_or_evaluate_orchestrator(
                         learning_rate=learning_rate,
                     )
                 mean_roc_auc_no_nan += head_metrics["auc_weighted"]
+                auc_count += 1
 
             final_metrics[head_name] = head_metrics
 
-        # Average AUC across all heads
-        mean_roc_auc_no_nan /= total_heads
+        # Average AUC across classification heads only
+        if auc_count > 0:
+            mean_roc_auc_no_nan /= auc_count
 
     # Update and save checkpoints
     if do_log:
@@ -1215,8 +1262,8 @@ def build_model(config, device, model_path=None, for_inference=False):
         model.to(device)
         if for_inference == False:
             ### Dont do distributed data parallel if inference is true.
-            # For MVM and RoPE, we need find_unused_parameters since some modules don't have gradients
-            find_unused = config.get("task") == "masked_video_modeling" or config.get("use_rope", False)
+            # Only use find_unused_parameters for MVM pretraining, not for fine-tuning
+            find_unused = config.get("task") == "masked_video_modeling"
             model = nn.parallel.DistributedDataParallel(
                 model, device_ids=[device.index], output_device=device.index,
                 find_unused_parameters=find_unused
@@ -1244,8 +1291,8 @@ def build_model(config, device, model_path=None, for_inference=False):
 
         return model, optimizer_state, scheduler_state, epoch, bestLoss, other_metrics, labels_map
     model.to(device)
-    # For MVM and RoPE, we need find_unused_parameters since some modules don't have gradients
-    find_unused = config.get("task") == "masked_video_modeling" or config.get("use_rope", False)
+    # Only use find_unused_parameters for MVM pretraining, not for fine-tuning
+    find_unused = config.get("task") == "masked_video_modeling"
     model = nn.parallel.DistributedDataParallel(
         model, device_ids=[device.index], output_device=device.index,
         find_unused_parameters=find_unused
@@ -1277,9 +1324,14 @@ def load_dataset(split, config, transforms, weighted_sampling):
     else:
         target_label: list[str] = config.get("label_loc_label", None)
         head_structure: dict[str, int] | None = config.get("head_structure", None)
-        if config["task"] == "classification":
-            if list(head_structure.keys()) != target_label and split == "train":
-                raise ValueError("Error: head_structure does not match target_label")
+        
+        # Check that head_structure keys match target_label for multi-head setups
+        if head_structure is not None and target_label is not None:
+            # Sort both lists for comparison since order shouldn't matter
+            if sorted(list(head_structure.keys())) != sorted(target_label) and split == "train":
+                print(f"head_structure keys: {sorted(list(head_structure.keys()))}")
+                print(f"target_label: {sorted(target_label)}")
+                raise ValueError("Error: head_structure keys do not match target_label columns")
 
         kwargs = {
             "target_label": target_label,
@@ -1290,9 +1342,13 @@ def load_dataset(split, config, transforms, weighted_sampling):
             "root": config["root"],
             "data_filename": config["data_filename"],
             "datapoint_loc_label": config.get("datapoint_loc_label", None),
-            "apply_mask": config["apply_mask"],
+            "apply_mask": config.get("apply_mask", False),
             "resize": config["resize"],
         }
+    
+    # Print apply_mask status for debugging (only once per dataset load)
+    if split == "train":
+        print(f"[Dataset] apply_mask = {config.get('apply_mask', False)}")
 
     if split != "inference":
         if config["view_count"] is None or config["view_count"] == 1:
@@ -1538,7 +1594,9 @@ def setup_optimizer_and_scheduler(model, config, epoch_resume=None):
         )
     elif config["scheduler_type"] == "step":
         scheduler = torch.optim.lr_scheduler.StepLR(
-            optim, config["lr_step_period"], config["factor"]
+            optim, 
+            config.get("lr_step_period", 10),  # Default: step every 10 epochs
+            config.get("factor", 0.1)  # Default: reduce LR by 10x
         )
     elif config["scheduler_type"] == "cosine_warm_restart":
         print("epoch", epoch_resume)
@@ -1695,12 +1753,21 @@ def train_or_evaluate_epoch(
                         # Convert dict values to tensors if they're not already
                         converted_outcomes = {}
                         for k, v in outcomes.items():
-                            if isinstance(v, list):
-                                converted_outcomes[k] = torch.tensor(v, dtype=torch.float32).to(device)
-                            elif isinstance(v, torch.Tensor):
-                                converted_outcomes[k] = v.to(device)
-                            else:
-                                converted_outcomes[k] = torch.tensor(v, dtype=torch.float32).to(device)
+                            try:
+                                if isinstance(v, list):
+                                    converted_outcomes[k] = torch.tensor(v, dtype=torch.float32).to(device)
+                                elif isinstance(v, torch.Tensor):
+                                    converted_outcomes[k] = v.to(device)
+                                else:
+                                    converted_outcomes[k] = torch.tensor(v, dtype=torch.float32).to(device)
+                            except (ValueError, TypeError) as e:
+                                print(f"[ERROR] Failed to convert outcome '{k}' to tensor.")
+                                print(f"  Value type: {type(v)}")
+                                print(f"  Value content: {v}")
+                                print(f"  Error: {e}")
+                                print(f"  Hint: Check if label_loc_label in config points to numeric columns")
+                                print(f"        or if labels_map is properly configured for string labels.")
+                                raise ValueError(f"Cannot convert outcome '{k}' with value {v} to tensor: {e}")
                         outcomes = converted_outcomes
                     else:
                         # If not a dictionary, convert to the expected format
@@ -1963,13 +2030,32 @@ def compute_loss_and_update_metrics(
         loss, individual_losses = multi_head_loss(outputs, outcomes)
         losses["main_loss"] = loss
         losses.update(individual_losses)
-        # Update metrics for each head
+        
+        # Get head_task to determine which heads are classification vs regression
+        head_task = config.get("head_task", {})
+        
+        # Update metrics for each head based on its task type
         for head_name in head_structure.keys():
-            num_classes = head_structure[head_name]
-            probabilities = get_probabilities(outputs[head_name], {"num_classes": num_classes})
-            update_classification_metrics(
-                metrics[phase][head_name], probabilities, outcomes[head_name], num_classes
-            )
+            # Determine task type for this head (default to classification for backward compatibility)
+            task_type = head_task.get(head_name, "classification")
+            
+            if task_type == "classification":
+                num_classes = head_structure[head_name]
+                probabilities = get_probabilities(outputs[head_name], {"num_classes": num_classes})
+                update_classification_metrics(
+                    metrics[phase][head_name], probabilities, outcomes[head_name], num_classes
+                )
+            elif task_type == "regression":
+                # For regression heads, just store the raw predictions
+                # Regression metrics will be computed later during evaluation
+                if head_name not in metrics[phase]:
+                    metrics[phase][head_name] = {"predictions": [], "targets": []}
+                metrics[phase][head_name]["predictions"].extend(
+                    outputs[head_name].detach().view(-1).cpu().numpy()
+                )
+                metrics[phase][head_name]["targets"].extend(
+                    outcomes[head_name].detach().view(-1).cpu().numpy()
+                )
     
     elif task == "masked_video_modeling":
         # For SSL tasks like MVM, there are no target labels
@@ -2402,8 +2488,11 @@ def main():
     sets up logging, creates transforms, and executes the main training and evaluation process.
     """
     import os
+    import pickle
+    import tempfile
 
     import yaml
+    import torch.distributed as dist
 
     args, additional_args = orion.utils.arg_parser.parse_args()
     
@@ -2412,26 +2501,84 @@ def main():
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
         print(f"Setting CUDA_VISIBLE_DEVICES={args.gpu}")
     
-    print("Arguments:", args)
-    print("Additional Arguments:", additional_args)
+    print(f"Process rank {args.local_rank}: Arguments:", args)
+    print(f"Process rank {args.local_rank}: Additional Arguments:", additional_args)
 
     if not os.path.exists(args.config_path):
         raise FileNotFoundError(f"Config file '{args.config_path}' not found.")
 
     with open(args.config_path) as file:
         config_defaults = yaml.safe_load(file)
-        print("Initial config", config_defaults)
-        # print("Initial config", config_defaults)
-    # Check if the script is running in sweep mode
-    # Initialize a WandB run if logging, otherwise return None
+        if args.local_rank == 0:
+            print("Initial config", config_defaults)
 
+    # Update config with additional args on rank 0
     if additional_args is not None:
         config_defaults = update_config(config_defaults, additional_args)
-        print("Updated config", config_defaults)
+        if args.local_rank == 0:
+            print("Updated config", config_defaults)
     else:
-        print("No additional arguments")
+        if args.local_rank == 0:
+            print("No additional arguments")
 
-    run = setup_run(args, config_defaults) if args.local_rank == 0 else None
+    # Check if we're in sweep mode
+    is_sweep_mode = os.environ.get("WANDB_SWEEP_ID") is not None or os.environ.get("WANDB_SWEEP_MODE") is not None
+    
+    if is_sweep_mode:
+        # For sweep mode with multiple GPUs:
+        # Only rank 0 initializes wandb and gets sweep config
+        # Then broadcasts config to all other ranks
+        print(f"Process rank {args.local_rank}: Sweep mode detected")
+        
+        # Use environment variable to get parent PID for consistent file naming across processes
+        parent_pid = os.environ.get("PARENT_PID", str(os.getppid()))
+        config_file = f"/tmp/wandb_sweep_config_{parent_pid}.pkl"
+        
+        # Initialize distributed if not already done (needed for barrier synchronization)
+        if not dist.is_initialized():
+            torch.cuda.set_device(args.local_rank)
+            dist.init_process_group(backend="nccl", init_method="env://")
+        
+        if args.local_rank == 0:
+            # Initialize wandb and get sweep config
+            run = setup_run(args, config_defaults)
+            if run and hasattr(run, 'config'):
+                # Update config_defaults with sweep parameters from wandb
+                sweep_config = dict(run.config)
+                config_defaults.update(sweep_config)
+                print(f"Rank 0: Updated config with sweep parameters: {sweep_config}")
+            
+            # Save config for other ranks
+            with open(config_file, 'wb') as f:
+                pickle.dump(config_defaults, f)
+            print(f"Rank 0: Saved config to {config_file}")
+        else:
+            run = None
+        
+        # Synchronize all processes
+        dist.barrier()
+        
+        if args.local_rank > 0:
+            # Load config from rank 0
+            import time
+            time.sleep(0.1)  # Small delay to ensure file is written
+            if os.path.exists(config_file):
+                with open(config_file, 'rb') as f:
+                    config_defaults = pickle.load(f)
+                print(f"Process rank {args.local_rank}: Loaded config from rank 0")
+            else:
+                print(f"Process rank {args.local_rank}: Warning - config file not found")
+        
+        # Final barrier to ensure all processes have the config before cleanup
+        dist.barrier()
+        
+        # Clean up temp file on rank 0 after all processes have read it
+        if args.local_rank == 0 and os.path.exists(config_file):
+            os.remove(config_file)
+            print(f"Rank 0: Cleaned up config file")
+    else:
+        # Normal mode (non-sweep)
+        run = setup_run(args, config_defaults) if args.local_rank == 0 else None
 
     # Create the transforms
     transform_list = create_transforms(config_defaults)
