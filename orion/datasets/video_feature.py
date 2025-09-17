@@ -182,7 +182,10 @@ class Video_feature(torch.utils.data.Dataset):
             """
             ### CHANGE
             import pandas as pd
-            df_w = pd.read_csv(data_filename, sep = 'α', engine='python')
+            if data_filename.endswith('.parquet'):
+                df_w = pd.read_parquet(data_filename)
+            else:
+                df_w = pd.read_csv(data_filename, sep = 'α', engine='python')
             w_list = df_w[target_label].loc[df_w['Split'] == 'TRAIN'].value_counts().tolist()
             w_max = max(w_list)
             for i in range(len(w_list)):

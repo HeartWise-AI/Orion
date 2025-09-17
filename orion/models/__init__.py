@@ -130,7 +130,7 @@ class RegressionHead(nn.Module):
 
 class SimpleRegressionHead(nn.Module):
     """Simpler regression head for better stability."""
-    def __init__(self, dim_in, num_classes=1):
+    def __init__(self, dim_in, num_classes=1, bias_init=30.0):
         super().__init__()
         # Much smaller intermediate dimension
         self.fc1 = nn.Conv3d(dim_in, 512, bias=True, kernel_size=1, stride=1)
@@ -142,7 +142,7 @@ class SimpleRegressionHead(nn.Module):
         nn.init.kaiming_normal_(self.fc1.weight, mode='fan_out', nonlinearity='relu')
         nn.init.constant_(self.fc1.bias, 0)
         nn.init.xavier_uniform_(self.regress.weight, gain=0.01)  # Small gain for regression
-        nn.init.constant_(self.regress.bias, 30.0)  # Initialize near mean LVEF
+        nn.init.constant_(self.regress.bias, bias_init)  # Initialize with configurable bias
 
     def forward(self, x):
         x = self.fc1(x)
@@ -197,12 +197,35 @@ class TransformerHead(nn.Module):
 
 class MultiOutputTransformerHead(nn.Module):
     """Multi-output head for Transformer models like MViT."""
-    def __init__(self, dim_in, head_structure: dict[str, int], dropout=0.5):
+    def __init__(self, dim_in, head_structure: dict[str, int], head_task: dict[str, str] = None, 
+                 regression_head_bias: dict[str, float] = None, dropout=0.5):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
         self.heads = nn.ModuleDict()
+        self.head_task = head_task or {}
+        self.regression_head_bias = regression_head_bias or {}
+        
         for head_name, num_classes in head_structure.items():
-            self.heads[head_name] = nn.Linear(dim_in, num_classes)
+            # Check if this head is for regression or classification
+            task_type = self.head_task.get(head_name, 'classification')
+            
+            # Create linear layer
+            linear = nn.Linear(dim_in, num_classes)
+            
+            # Apply task-specific initialization
+            if task_type == 'regression':
+                # Better initialization for regression
+                nn.init.xavier_uniform_(linear.weight, gain=0.1)  # Increased gain for better gradient flow
+                # Initialize bias from config if provided, otherwise use default
+                bias_init = self.regression_head_bias.get(head_name, 30.0)
+                nn.init.constant_(linear.bias, bias_init)
+            else:
+                # Default initialization for classification is usually fine
+                # PyTorch's default Linear initialization works well for classification
+                pass
+            
+            self.heads[head_name] = linear
+            
         self.head_structure = head_structure
     
     def forward(self, x):
@@ -211,7 +234,8 @@ class MultiOutputTransformerHead(nn.Module):
 
 
 class MultiOutputHead(nn.Module):
-    def __init__(self, dim_in, head_structure: dict[str, int], head_task: dict[str, str] = None):
+    def __init__(self, dim_in, head_structure: dict[str, int], head_task: dict[str, str] = None,
+                 regression_head_bias: dict[str, float] = None):
         """
         Initialize a multi-output head with different number of classes per head.
 
@@ -220,11 +244,13 @@ class MultiOutputHead(nn.Module):
             head_structure (dict[str, int]): Dictionary mapping head names to their number of output classes
                 e.g. {"contrast_agent": 1, "main_structure": 5, "stent_presence": 1}
             head_task (dict[str, str]): Optional dictionary mapping head names to task types ('classification' or 'regression')
+            regression_head_bias (dict[str, float]): Optional dictionary mapping head names to bias initialization values for regression
         """
         super().__init__()
         self.dropout = nn.Dropout(p=0.5)
         self.heads = nn.ModuleDict()
         self.head_task = head_task or {}
+        self.regression_head_bias = regression_head_bias or {}
         
         for head_name, num_classes in head_structure.items():
             if not isinstance(num_classes, int) or num_classes < 1:
@@ -234,8 +260,9 @@ class MultiOutputHead(nn.Module):
             task_type = self.head_task.get(head_name, 'classification')
             
             if task_type == 'regression':
-                # Use SimpleRegressionHead for regression tasks (more stable)
-                self.heads[head_name] = SimpleRegressionHead(dim_in, num_classes)
+                # Use SimpleRegressionHead for regression tasks with configurable bias
+                bias_init = self.regression_head_bias.get(head_name, 30.0)
+                self.heads[head_name] = SimpleRegressionHead(dim_in, num_classes, bias_init=bias_init)
             else:
                 # For classification, use proper ClassificationHead
                 self.heads[head_name] = ClassificationHead(dim_in, num_classes)
@@ -414,19 +441,25 @@ class MVMHead(nn.Module):
         # Store encoder reference (will be set by model)
         self.encoder = None
     
-    def forward_with_encoder(self, x, encoder):
+    def forward_with_encoder(self, x, encoder, cached_hog_features=None):
         """Forward pass for MVM head with encoder provided.
         
         Args:
             x: Video tensors [B, C, T, H, W]
             encoder: The encoder model to use for feature extraction
+            cached_hog_features: Pre-computed HOG features [B, T, num_patches, hog_dim]
         """
         if x.dim() != 5:
             # Return a dummy loss for compatibility
             return {'loss': torch.tensor(0.0, device=x.device)}
             
-        # Pass video through MVM with encoder
-        outputs = self.mvm(x, encoder_model=encoder, mask_ratio=self.mvm_config.get('mask_ratio', 0.75))
+        # Pass video through MVM with encoder and cached HOG if available
+        outputs = self.mvm(
+            x, 
+            encoder_model=encoder, 
+            mask_ratio=self.mvm_config.get('mask_ratio', 0.75),
+            cached_hog_features=cached_hog_features
+        )
         
         # The target is already set correctly inside MVM forward
         # For feature reconstruction, it's the encoded features
@@ -436,8 +469,12 @@ class MVMHead(nn.Module):
     
     def forward(self, x):
         """Forward pass for MVM head (compatibility)."""
-        # This should not be called directly when encoder is needed
-        if x.dim() != 5:
+        # If using patch projection, process directly
+        if x.dim() == 5 and self.mvm_config.get('use_patch_projection', True):
+            # Direct MVM forward without encoder
+            outputs = self.mvm(x, encoder_model=None, mask_ratio=self.mvm_config.get('mask_ratio', 0.75))
+            return outputs
+        elif x.dim() != 5:
             return {'loss': torch.tensor(0.0, device=x.device)}
         # Return dummy outputs for compatibility
         return {'loss': torch.tensor(0.0, device=x.device)}
@@ -466,6 +503,8 @@ def replace_final_layer(model, config):
                     model.head = MultiOutputTransformerHead(
                         dim_in=in_features, 
                         head_structure=config["head_structure"],
+                        head_task=config.get("head_task", {}),
+                        regression_head_bias=config.get("regression_head_bias", {}),
                         dropout=0.5
                     )
                     print(f"Replaced final layer with MultiOutputTransformerHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression")
@@ -480,6 +519,8 @@ def replace_final_layer(model, config):
                     model.head = MultiOutputTransformerHead(
                         dim_in=in_features, 
                         head_structure=config["head_structure"],
+                        head_task=config.get("head_task", {}),
+                        regression_head_bias=config.get("regression_head_bias", {}),
                         dropout=0.5
                     )
                     print(f"Replaced final layer with MultiOutputTransformerHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head classification")
@@ -528,10 +569,14 @@ def replace_final_layer(model, config):
                 
                 # Monkey-patch MViT forward for MVM
                 original_forward = model.forward
-                def mvm_forward(self, x):
+                def mvm_forward(self, x, cached_hog_features=None):
                     """MVM forward that returns MVM outputs directly."""
-                    # Pass the encoder (self) to the head
-                    return self.head.forward_with_encoder(x, self)
+                    # For MViT with patch projection, don't use encoder features
+                    if hasattr(self.head, 'mvm') and self.head.mvm_config.get('use_patch_projection', True):
+                        return self.head(x)  # Direct forward without encoder
+                    else:
+                        # Pass the encoder (self) to the head with cached HOG if available
+                        return self.head.forward_with_encoder(x, self, cached_hog_features=cached_hog_features)
                 model.forward = MethodType(mvm_forward, model)
                 print("Patched MViT with get_intermediate_features and MVM forward")
             else:
@@ -551,7 +596,8 @@ def replace_final_layer(model, config):
                     model.head = MultiOutputHead(
                         dim_in=in_features, 
                         head_structure=config["head_structure"],
-                        head_task=config.get("head_task", {})
+                        head_task=config.get("head_task", {}),
+                        regression_head_bias=config.get("regression_head_bias", {})
                     )
                     print(
                         f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression"
@@ -570,7 +616,8 @@ def replace_final_layer(model, config):
                 model.head = MultiOutputHead(
                     dim_in=in_features, 
                     head_structure=config["head_structure"],
-                    head_task=config.get("head_task", {})
+                    head_task=config.get("head_task", {}),
+                    regression_head_bias=config.get("regression_head_bias", {})
                 )
                 print(
                     f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
@@ -602,7 +649,8 @@ def replace_final_layer(model, config):
                 model.blocks[-1] = MultiOutputHead(
                     dim_in=in_features, 
                     head_structure=config["head_structure"],
-                    head_task=config.get("head_task", {})
+                    head_task=config.get("head_task", {}),
+                    regression_head_bias=config.get("regression_head_bias", {})
                 )
                 print(
                     f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression"
@@ -619,7 +667,8 @@ def replace_final_layer(model, config):
             model.blocks[-1] = MultiOutputHead(
                 dim_in=in_features, 
                 head_structure=config["head_structure"],
-                head_task=config.get("head_task", {})
+                head_task=config.get("head_task", {}),
+                regression_head_bias=config.get("regression_head_bias", {})
             )
             print(
                 f"Replaced final block with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"
@@ -655,7 +704,8 @@ def replace_final_layer(model, config):
                 model.head = MultiOutputHead(
                     dim_in=in_features, 
                     head_structure=config["head_structure"],
-                    head_task=config.get("head_task", {})
+                    head_task=config.get("head_task", {}),
+                    regression_head_bias=config.get("regression_head_bias", {})
                 )
                 print(
                     f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']}) for multi-head regression"
@@ -672,7 +722,8 @@ def replace_final_layer(model, config):
             model.head = MultiOutputHead(
                 dim_in=in_features, 
                 head_structure=config["head_structure"],
-                head_task=config.get("head_task", {})
+                head_task=config.get("head_task", {}),
+                regression_head_bias=config.get("regression_head_bias", {})
             )
             print(
                 f"Replaced final layer with MultiOutputHead(dim_in={in_features}, head_structure={config['head_structure']})"

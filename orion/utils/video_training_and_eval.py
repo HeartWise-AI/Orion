@@ -209,6 +209,13 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
     # Simplified DataLoader setup
     def create_dataloader(dataset, sampler_type, batch_size, num_workers, pin_memory, drop_last):
         sampler = sampler_type(dataset)
+        
+        # Use custom collate function if HOG caching is enabled
+        collate_fn = None
+        if hasattr(dataset, 'use_cached_hog') and dataset.use_cached_hog:
+            from orion.datasets.video import custom_collate_with_hog
+            collate_fn = custom_collate_with_hog
+        
         return (
             torch.utils.data.DataLoader(
                 dataset,
@@ -217,6 +224,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 sampler=sampler,
                 pin_memory=pin_memory,
                 drop_last=drop_last,
+                collate_fn=collate_fn,
             ),
             sampler,
         )
@@ -348,12 +356,19 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
         print(f"  - Warmup steps: {warmup_steps}")
         print(f"  - Total steps: {total_steps}")
 
+    # Store train dataloader length for consistent step counting across phases
+    train_dataloader_len = len(dataloaders['train'])
+    
     for epoch in range(epoch_resume, config["num_epochs"]):
         print("Epoch #", epoch)
         for phase in ["train", "val"]:
             start_time = time.time()
             samplers[phase].set_epoch(epoch)
 
+            # Pass train dataloader length via config for consistent step counting
+            config_with_train_len = config.copy()
+            config_with_train_len['train_dataloader_len'] = train_dataloader_len
+            
             best_metrics = run_training_or_evaluate_orchestrator(
                 model,
                 dataloaders[phase],
@@ -361,7 +376,7 @@ def execute_run(config_defaults=None, transforms=None, args=None, run=None):
                 phase,
                 optimizer,
                 scheduler,
-                config,
+                config_with_train_len,
                 device,
                 task,
                 weights,
@@ -479,7 +494,8 @@ def setup_config(config, transforms, is_master, run, device):
                     target_label = config.get("head_structure", None)
 
                 # Only rank 0 loads the dataset & computes
-                print("[Rank 0] computing mean/std for single-view ...")
+                print(f"[Rank 0] computing mean/std for single-view from {config['batch_size']} samples...")
+                print(f"Creating dataset from: {config['data_filename']}")
                 mean, std = orion.utils.get_mean_and_std(
                     orion.datasets.Video(
                         root=config["root"],
@@ -492,7 +508,10 @@ def setup_config(config, transforms, is_master, run, device):
                         weighted_sampling=False,
                         normalize=False,
                         length=config["frames"],
+                        mean=[128, 128, 128],  # Dummy values for initialization
+                        std=[64, 64, 64],  # Dummy values for initialization
                     ),
+                    samples=config["batch_size"],  # Just use one batch worth of samples
                     batch_size=config["batch_size"],
                     num_workers=config["num_workers"],
                 )
@@ -540,6 +559,7 @@ def setup_config(config, transforms, is_master, run, device):
                         length=config["frames"],
                         labels_map=config.get("labels_map", None),
                     ),
+                    samples=config["batch_size"],  # Just use one batch worth of samples
                     batch_size=config["batch_size"],
                     num_workers=config["num_workers"],
                 )
@@ -697,8 +717,15 @@ def run_training_or_evaluate_orchestrator(
             # Additional SSL-specific logging if ssl_logger is available
             if ssl_logger is not None:
                 # Calculate proper global step for epoch-level logging
-                # Use a separate step counter that doesn't conflict with batch-level logging
-                epoch_step = epoch * 10000  # Large multiplier to avoid conflicts
+                # Use the same formula as batch logging to ensure monotonic steps
+                train_batches_per_epoch = config.get('train_dataloader_len', len(dataloader))
+                if phase == "val":
+                    # For validation epoch summary, use the end of validation
+                    epoch_step = (epoch + 1) * train_batches_per_epoch + len(dataloader) - 1
+                else:
+                    # For training epoch summary, use the end of training epoch
+                    epoch_step = (epoch + 1) * train_batches_per_epoch - 1
+                    
                 print(f"[SSL] Logging epoch {epoch} summary at step {epoch_step}")
                 
                 ssl_logger.log_training_dynamics(
@@ -1344,6 +1371,11 @@ def load_dataset(split, config, transforms, weighted_sampling):
             "datapoint_loc_label": config.get("datapoint_loc_label", None),
             "apply_mask": config.get("apply_mask", False),
             "resize": config["resize"],
+            "regression_value_scale": config.get("regression_value_scale", None),
+            "head_task": config.get("head_task", None),
+            "max_videos": config.get("max_videos", None),
+            "use_cached_hog": config.get("use_cached_hog", False),
+            "hog_cache_dir": config.get("hog_cache_dir", "hog_features_cache"),
         }
     
     # Print apply_mask status for debugging (only once per dataset load)
@@ -1482,7 +1514,23 @@ def get_predictions(
                 with torch.autocast(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
-                    outputs = model(data)  # Get model outputs
+                    # Pass cached HOG features if available for MVM tasks
+                    if task == "masked_video_modeling" and cached_hog is not None:
+                        # Check if any elements in the batch are None (missing cache)
+                        if isinstance(cached_hog, torch.Tensor):
+                            # Move cached HOG to device
+                            cached_hog = cached_hog.to(device)
+                            # Log periodically to confirm cache usage
+                            if batch_idx % 20 == 1:  # Every 20 batches
+                                print(f"[MVM Training] ✅ Using CACHED HOG features from disk: shape {cached_hog.shape}")
+                            outputs = model(data, cached_hog_features=cached_hog)
+                        else:
+                            # Some or all cached HOG missing, compute on-the-fly
+                            if batch_idx % 20 == 1:
+                                print(f"[MVM Training] ⚠️ No cache, computing HOG on-the-fly")
+                            outputs = model(data)
+                    else:
+                        outputs = model(data)  # Get model outputs
 
                     # Convert outputs to dictionary format if it's not already
                     if not isinstance(outputs, dict):
@@ -1703,7 +1751,17 @@ def train_or_evaluate_epoch(
 
     with torch.set_grad_enabled(is_training):
         with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch}") as pbar:
-            for batch_idx, (data, outcomes, fnames) in enumerate(dataloader, 1):
+            for batch_idx, batch in enumerate(dataloader, 1):
+                # Handle batch unpacking with optional cached HOG features
+                cached_hog = None
+                if len(batch) == 4:
+                    data, outcomes, fnames, cached_hog = batch
+                    if batch_idx == 1:  # Log once per epoch
+                        print(f"[Training] Using cached HOG features: shape {cached_hog.shape if cached_hog is not None else 'None'}")
+                elif len(batch) == 3:
+                    data, outcomes, fnames = batch
+                else:
+                    raise ValueError(f"Unexpected batch size: {len(batch)}")
                 # If multi-view, shape => list of length B, each item => list of Tensor
                 #
                 if config["view_count"] is not None and config["view_count"] > 1:
@@ -1792,7 +1850,23 @@ def train_or_evaluate_epoch(
                 with torch.autocast(
                     device_type=device.type, dtype=torch.float16, enabled=use_amp
                 ):
-                    outputs = model(data)
+                    # Pass cached HOG features if available for MVM tasks
+                    if task == "masked_video_modeling" and cached_hog is not None:
+                        # Check if any elements in the batch are None (missing cache)
+                        if isinstance(cached_hog, torch.Tensor):
+                            # Move cached HOG to device
+                            cached_hog = cached_hog.to(device)
+                            # Log periodically to confirm cache usage
+                            if batch_idx % 20 == 1:  # Every 20 batches
+                                print(f"[MVM Training] ✅ Using CACHED HOG features from disk: shape {cached_hog.shape}")
+                            outputs = model(data, cached_hog_features=cached_hog)
+                        else:
+                            # Some or all cached HOG missing, compute on-the-fly
+                            if batch_idx % 20 == 1:
+                                print(f"[MVM Training] ⚠️ No cache, computing HOG on-the-fly")
+                            outputs = model(data)
+                    else:
+                        outputs = model(data)
 
                     # Convert outputs to dictionary format if it's not already
                     if not isinstance(outputs, dict):
@@ -1803,13 +1877,33 @@ def train_or_evaluate_epoch(
                     outputs_for_predictions = outputs.copy() if isinstance(outputs, dict) else outputs
                     
                     # Log SSL visualizations if applicable
-                    if task == "masked_video_modeling" and ssl_logger is not None and phase == "train":
-                        # Log periodically (every N batches)
-                        global_step = epoch * len(dataloader) + batch_idx
-                        log_interval = config.get('ssl_log_interval', 50)
-                        if global_step % log_interval == 0:
+                    if task == "masked_video_modeling" and ssl_logger is not None:
+                        # Calculate global step properly - use training dataloader length for consistency
+                        # This ensures monotonically increasing steps across train and val
+                        train_batches_per_epoch = config.get('train_dataloader_len', len(dataloader))
+                        if phase == "val":
+                            # For validation, use end of training epoch step count
+                            global_step = (epoch + 1) * train_batches_per_epoch + batch_idx
+                        else:
+                            # For training, normal calculation
+                            global_step = epoch * train_batches_per_epoch + batch_idx
+                        
+                        # Different logging interval for validation - always log on first batch
+                        if phase == "val":
+                            log_interval = 1  # Always log validation visualizations
+                        else:
+                            log_interval = config.get('ssl_log_interval', 50)
+                            
+                        # Training: log every N batches. Validation: log once on first batch only
+                        should_log = (phase == "train" and global_step % log_interval == 0) or (phase == "val" and batch_idx == 0)
+                        
+                        # Check if we're the master process (rank 0)
+                        import torch.distributed as dist
+                        is_master = not dist.is_initialized() or dist.get_rank() == 0
+                        
+                        if should_log and ssl_logger is not None and is_master:
                             # Debug logging
-                            print(f"[SSL LOG] Batch {batch_idx}, Global step {global_step}, logging interval {log_interval}")
+                            print(f"[SSL LOG] Batch {batch_idx}, Global step {global_step}, logging interval {log_interval}, is_master={is_master}")
                             # Always log that we reached a logging point
                             wandb.log({"ssl/logging_checkpoint": global_step}, step=global_step)
                             
@@ -1845,6 +1939,7 @@ def train_or_evaluate_epoch(
                                     try:
                                         # Get target type from config
                                         target_type = config.get('mvm_config', {}).get('target_type', 'pixel')
+                                        print(f"[SSL VIZ] Calling log_reconstruction_visualizations with target_type={target_type}, batch_shape={data.shape}")
                                         ssl_logger.log_reconstruction_visualizations(
                                             videos=data,
                                             pred=outputs.get('pred', None),
@@ -1854,8 +1949,11 @@ def train_or_evaluate_epoch(
                                             target_type=target_type,
                                             hog_targets=outputs.get('target') if target_type == 'hog' else None
                                         )
+                                        print(f"[SSL VIZ] Visualization logging completed successfully")
                                     except Exception as e:
-                                        print(f"Visualization failed: {e}")
+                                        import traceback
+                                        print(f"[SSL VIZ ERROR] Visualization failed: {e}")
+                                        print(f"[SSL VIZ ERROR] Traceback: {traceback.format_exc()}")
                                         wandb.log({"ssl/viz_error": str(e)[:100]}, step=global_step)
                     
                     # Now returns a dictionnary of losses {"main_loss": main_loss, "loss_1": loss_1, "loss_2": loss_2, ...}
@@ -1882,8 +1980,17 @@ def train_or_evaluate_epoch(
                             targets[head_name] = []
 
                         # Add predictions and targets for each head
+                        # Check if we have mixed tasks (classification + regression)
+                        head_task_config = config.get("head_task", {})
+                        if head_task_config and head_name in head_task_config:
+                            # Use the specific task for this head
+                            head_specific_task = head_task_config[head_name]
+                        else:
+                            # Fall back to global task
+                            head_specific_task = task
+                        
                         predictions[head_name].extend(
-                            get_predictions_during_training(outputs_for_predictions[head_name], task)
+                            get_predictions_during_training(outputs_for_predictions[head_name], head_specific_task)
                         )
                         if outcomes is not None and head_name in outcomes:
                             targets[head_name].extend(outcomes[head_name].detach().cpu().numpy())
@@ -2150,6 +2257,12 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
     # Create data loader for inference
     dataset = load_dataset(split, config, None, False)
     print("Dataset loaded successfully")
+    # Use custom collate function if HOG caching is enabled
+    collate_fn = None
+    if hasattr(dataset, 'use_cached_hog') and dataset.use_cached_hog:
+        from orion.datasets.video import custom_collate_with_hog
+        collate_fn = custom_collate_with_hog
+    
     split_dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=config["batch_size"],
@@ -2157,6 +2270,7 @@ def perform_inference(split, config, log_wandb, metrics=None, best_metrics=None)
         shuffle=False,
         pin_memory=(config["device"] == "cuda"),
         drop_last=(split != "test" and split != "inference"),
+        collate_fn=collate_fn,
     )
 
     print("Dataloader created successfully")
@@ -2300,14 +2414,66 @@ def format_dataframe_predictions(filenames, predictions, task, config, labels_ma
     """Format predictions into a pandas DataFrame with 1 row per sample."""
     df_predictions = pd.DataFrame({"filename": filenames})
 
-    if task == "classification":
-        _add_classification_predictions(df_predictions, predictions, config, targets)
-    elif task == "regression":
-        _add_regression_predictions(df_predictions, predictions, targets)
+    # Check if we have mixed tasks (classification + regression)
+    head_task_config = config.get("head_task", {})
+    
+    if head_task_config and isinstance(predictions, dict):
+        # Handle mixed tasks - process each head according to its specific task
+        for head_name in predictions.keys():
+            head_specific_task = head_task_config.get(head_name, task)
+            
+            if head_specific_task == "classification":
+                # Add classification predictions for this specific head
+                _add_classification_predictions_for_head(
+                    df_predictions, head_name, predictions[head_name], 
+                    config["head_structure"][head_name], config, 
+                    targets.get(head_name) if targets else None
+                )
+            elif head_specific_task == "regression":
+                # Add regression predictions for this specific head
+                _add_regression_predictions_for_head(
+                    df_predictions, head_name, predictions[head_name],
+                    targets.get(head_name) if targets else None
+                )
     else:
-        raise ValueError(f"Unsupported task: {task}")
+        # Original behavior for single task
+        if task == "classification":
+            _add_classification_predictions(df_predictions, predictions, config, targets)
+        elif task == "regression":
+            _add_regression_predictions(df_predictions, predictions, targets)
+        else:
+            raise ValueError(f"Unsupported task: {task}")
 
     return df_predictions
+
+
+def _add_classification_predictions_for_head(df_predictions, head_name, pred_array, num_classes, config, target_array):
+    """Add classification predictions for a specific head to DataFrame."""
+    _validate_predictions_length(len(pred_array), len(df_predictions), head_name)
+    
+    # Add raw predictions
+    df_predictions[f"pred_{head_name}"] = pred_array
+    
+    # Add predicted class
+    df_predictions[f"{head_name}_class"] = _get_predicted_classes(
+        pred_array, num_classes, config
+    )
+    
+    # Add ground truth if present
+    if target_array is not None:
+        df_predictions[f"target_{head_name}"] = target_array
+
+
+def _add_regression_predictions_for_head(df_predictions, head_name, pred_array, target_array):
+    """Add regression predictions for a specific head to DataFrame."""
+    _validate_predictions_length(len(pred_array), len(df_predictions), head_name)
+    
+    # Add predictions (continuous values for regression)
+    df_predictions[f"pred_{head_name}"] = pred_array
+    
+    # Add ground truth if present
+    if target_array is not None:
+        df_predictions[f"target_{head_name}"] = target_array
 
 
 def _add_classification_predictions(df_predictions, predictions, config, targets):

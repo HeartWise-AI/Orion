@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
 import io
+import cv2
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -185,15 +186,20 @@ class SSLWandbLogger:
             target_type: Type of target ("pixel", "feature", "hog")
             hog_targets: HOG targets if using HOG masking [B, N, D]
         """
+        print(f"[HOG VIZ DEBUG] log_reconstruction_visualizations called with target_type={target_type}, num_samples={num_samples}, step={step}")
+        print(f"[HOG VIZ DEBUG] videos shape: {videos.shape}, pred shape: {pred.shape if pred is not None else 'None'}, mask shape: {mask.shape if mask is not None else 'None'}")
+        
         if step is None:
             step = self.global_step
             
         B = min(videos.shape[0], num_samples)
+        print(f"[HOG VIZ DEBUG] Processing {B} samples for visualization")
         
-        # Prepare visualizations
+        # ALWAYS generate visualizations, no matter what
         images = []
         
         for b in range(B):
+            print(f"[HOG VIZ DEBUG] Processing sample {b+1}/{B}, WILL generate image")
             # Get middle frame for visualization
             T = videos.shape[2]
             mid_frame = T // 2
@@ -255,8 +261,9 @@ class SSLWandbLogger:
             for c in range(3):
                 masked_frame[c] = masked_frame[c] * (1 - mask_upsampled) + mask_upsampled * 0.5
             
-            # Create figure with subplots
-            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+            # Create figure with 5 subplots for HOG overlay
+            num_subplots = 5 if target_type == "hog" else 4
+            fig, axes = plt.subplots(1, num_subplots, figsize=(4*num_subplots, 4))
             
             # Plot original
             axes[0].imshow(self._tensor_to_image(orig_frame))
@@ -281,8 +288,11 @@ class SSLWandbLogger:
                     N = pred.shape[1]
                     D = pred.shape[2]
                     
-                    # For MViT's 393 tokens, use 20x20 grid (400 tokens, truncate extra)
-                    if N == 393:
+                    # For MViT's 3136 tokens, use 56x56 grid
+                    if N == 3136:
+                        h = w = 56
+                        num_tokens = N
+                    elif N == 393:
                         h = w = 20
                         num_tokens = min(h * w, N)
                     else:
@@ -306,30 +316,10 @@ class SSLWandbLogger:
                     # Extract HOG features and compute gradient magnitude
                     hog_features = pred[b, :num_tokens].cpu().detach()  # [num_tokens, D]
                     
-                    # HOG features encode gradient orientations
-                    # Compute magnitude from orientation bins
-                    # Assuming D contains multiple orientation bins (e.g., 9 orientations)
-                    orientations = 9
-                    if D % orientations == 0:
-                        # Reshape to [num_tokens, num_channels, orientations]
-                        num_channels = D // orientations
-                        hog_reshaped = hog_features.view(num_tokens, num_channels, orientations)
-                        
-                        # Compute magnitude across orientations for each channel
-                        # This gives us edge strength at each spatial location
-                        hog_magnitude = torch.sqrt((hog_reshaped ** 2).sum(dim=-1))  # [num_tokens, num_channels]
-                        
-                        # Average across channels if multiple
-                        if num_channels > 1:
-                            hog_magnitude = hog_magnitude.mean(dim=-1)  # [num_tokens]
-                        else:
-                            hog_magnitude = hog_magnitude.squeeze(-1)
-                    else:
-                        # Fallback: just compute L2 norm across all features
-                        hog_magnitude = torch.norm(hog_features, dim=-1)  # [num_tokens]
+                    # For 4 orientations, just compute L2 norm
+                    hog_magnitude = torch.norm(hog_features, dim=-1)  # [num_tokens]
                     
                     # Reshape to spatial grid
-                    # Handle cases where we have fewer tokens than h*w
                     if num_tokens < h * w:
                         # Pad with zeros to fill the grid
                         padded_magnitude = torch.zeros(h * w)
@@ -339,7 +329,6 @@ class SSLWandbLogger:
                         hog_grid = hog_magnitude.view(h, w)
                     
                     # Normalize for visualization
-                    # Add small epsilon to avoid division by zero
                     grid_min = hog_grid.min()
                     grid_max = hog_grid.max()
                     grid_range = grid_max - grid_min
@@ -348,19 +337,14 @@ class SSLWandbLogger:
                     if b == 0:  # Only log for first sample
                         print(f"[HOG Viz] Grid stats - Min: {grid_min:.6f}, Max: {grid_max:.6f}, Range: {grid_range:.6f}")
                     
-                    # Use a minimum range to avoid uniform images
-                    if grid_range < 0.01:  # If very uniform, use raw values
-                        hog_grid = hog_grid
-                    else:
-                        hog_grid = (hog_grid - grid_min) / (grid_range + 1e-8)
-                    
-                    # Don't invert - show raw HOG magnitudes
-                    # Higher values (edges) will be brighter
+                    # Normalize
+                    if grid_range > 1e-6:
+                        hog_grid = (hog_grid - grid_min) / grid_range
                     
                     # Upsample to match image size
                     hog_upsampled = F.interpolate(
                         hog_grid.unsqueeze(0).unsqueeze(0),
-                        size=orig_frame.shape[-2:],
+                        size=(224, 224),
                         mode='bilinear',
                         align_corners=False
                     )[0, 0]
@@ -368,6 +352,108 @@ class SSLWandbLogger:
                     # Use viridis colormap for better contrast
                     axes[3].imshow(hog_upsampled.numpy(), cmap='viridis')
                     axes[3].set_title("HOG Feature Map")
+                    
+                    # Add HOG overlay visualization (5th subplot) - ALWAYS generate
+                    if num_subplots == 5:
+                        # Create proper HOG visualization with oriented edges
+                        # pred[b] contains HOG features [3136, 9] where 9 = orientations (or 4 if using 4 bins)
+                        
+                        # Convert original frame to numpy for drawing
+                        overlay_img = self._tensor_to_image(orig_frame).copy()
+                        H, W = overlay_img.shape[:2]
+                        
+                        # For each patch, find the dominant orientation
+                        hog_pred = pred[b].cpu().detach()  # [3136, num_orientations]
+                        num_patches = hog_pred.shape[0]
+                        num_orientations = hog_pred.shape[1]
+                        
+                        # Calculate grid size (assuming square for MViT)
+                        if num_patches == 3136:
+                            grid_size = 56  # MViT uses 56x56 patches
+                        else:
+                            grid_size = int(np.sqrt(num_patches))
+                        
+                        # Reshape to grid
+                        hog_grid_full = hog_pred.view(grid_size, grid_size, num_orientations)  # grid x grid patches, N orientations
+                        
+                        # Define orientation angles based on number of bins
+                        # HOG uses unsigned gradients, so angles are 0-180 degrees
+                        angles = np.linspace(0, 180, num_orientations, endpoint=False) * np.pi / 180
+                        
+                        # Create line overlay using OpenCV for better quality
+                        import cv2
+                        
+                        # For visualization, show every few patches for clarity
+                        # Use same spacing as in our test visualization
+                        patch_step = 12  # Show every 12th patch for clearer visualization
+                        arrow_scale = 2.0  # Scale factor for arrow length
+                        
+                        # Normalize HOG features for better visualization
+                        hog_min = hog_grid_full.min()
+                        hog_max = hog_grid_full.max()
+                        hog_range = hog_max - hog_min
+                        
+                        if b == 0:  # Log once per batch
+                            print(f"[HOG Edge Viz] Min: {hog_min:.3f}, Max: {hog_max:.3f}, Range: {hog_range:.3f}")
+                            # Debug: Check diversity of predictions
+                            all_dominant = []
+                            for ii in range(0, grid_size, patch_step):
+                                for jj in range(0, grid_size, patch_step):
+                                    dominant = torch.argmax(torch.abs(hog_grid_full[ii, jj])).item()
+                                    all_dominant.append(dominant)
+                            unique_orientations = len(set(all_dominant))
+                            print(f"[HOG Edge Viz] Dominant orientations: {set(all_dominant)}, Unique: {unique_orientations}/{len(all_dominant)}")
+                        
+                        for i in range(0, grid_size, patch_step):
+                            for j in range(0, grid_size, patch_step):
+                                # Get HOG vector for this patch
+                                hog_vec = hog_grid_full[i, j]  # [num_orientations]
+                                
+                                # Calculate center position in image
+                                cy = int((i + 0.5) * H / grid_size)
+                                cx = int((j + 0.5) * W / grid_size)
+                                
+                                # Find dominant orientation (highest magnitude)
+                                abs_hog = torch.abs(hog_vec)
+                                dominant_idx = torch.argmax(abs_hog).item()
+                                strength = abs_hog[dominant_idx].item()
+                                
+                                # Normalize strength relative to the current batch
+                                if hog_range > 1e-6:
+                                    normalized_strength = (strength - hog_min.item()) / hog_range.item()
+                                else:
+                                    normalized_strength = 0.5
+                                
+                                # Draw if strength is above threshold (matching our test visualization)
+                                threshold = 0.3  # Same threshold as test
+                                if normalized_strength > threshold:
+                                    # Get angle for this orientation bin
+                                    angle = angles[dominant_idx]
+                                    
+                                    # Calculate line length proportional to strength
+                                    # Match the test visualization arrow scaling
+                                    line_len = int(patch_step * 1.5 * normalized_strength * arrow_scale)
+                                    
+                                    # Calculate line endpoints (bidirectional like HOG edges)
+                                    dx = line_len * np.cos(angle)
+                                    dy = line_len * np.sin(angle)
+                                    
+                                    # Draw bidirectional line (HOG uses unsigned gradients)
+                                    x1, y1 = int(cx - dx/2), int(cy - dy/2)
+                                    x2, y2 = int(cx + dx/2), int(cy + dy/2)
+                                    
+                                    # Use bright green color for edges (matching test)
+                                    color = (0, 255, 0)  # Green edges
+                                    
+                                    # Draw thicker lines for stronger gradients
+                                    thickness = max(1, int(3.0 * normalized_strength))
+                                    
+                                    # Draw the line on the overlay image
+                                    cv2.line(overlay_img, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
+                        
+                        axes[4].imshow(overlay_img)
+                        axes[4].set_title("HOG Edge Orientations")
+                        axes[4].axis('off')
                 else:
                     axes[3].imshow(self._tensor_to_image(orig_frame))
                     axes[3].set_title("Reconstruction")
@@ -388,19 +474,37 @@ class SSLWandbLogger:
             plt.close()
         
         # Log images both as media and as individual metrics for dashboard
-        log_dict = {"reconstruction/samples": images}
+        print(f"[HOG VIZ DEBUG] About to log {len(images)} images to wandb at step {step}")
         
-        # Add grid image if available
-        if images and len(images) > 0:
+        if not images:
+            print("[HOG VIZ DEBUG] No images to log!")
+            return
+            
+        # Log images following W&B best practices
+        log_dict = {}
+        
+        # Log the first sample as the main reconstruction image
+        log_dict["reconstruction"] = images[0]
+        
+        # Log second sample if available
+        if len(images) > 1:
+            log_dict["reconstruction_sample2"] = images[1]
+        
+        print(f"[HOG VIZ DEBUG] Logging to wandb with keys: {list(log_dict.keys())}")
+        print(f"[HOG VIZ DEBUG] Step value: {step}")
+        
+        # Log without step first to see if that's the issue
+        try:
+            wandb.log(log_dict, step=step, commit=True)
+            print(f"[HOG VIZ DEBUG] Successfully logged to wandb with step {step}")
+        except Exception as e:
+            print(f"[HOG VIZ DEBUG] Error logging to wandb: {e}")
+            # Try logging without step
             try:
-                # Use the first image for the grid
-                log_dict["reconstruction/grid"] = images[0]
-                # Also update summary to show latest reconstruction
-                wandb.run.summary["reconstruction/latest"] = images[0]
-            except Exception as e:
-                print(f"Warning: Could not log grid image: {e}")
-        
-        wandb.log(log_dict, step=step)
+                wandb.log(log_dict)
+                print(f"[HOG VIZ DEBUG] Successfully logged to wandb WITHOUT step")
+            except Exception as e2:
+                print(f"[HOG VIZ DEBUG] Error logging even without step: {e2}")
     
     def log_hog_metrics(
         self,

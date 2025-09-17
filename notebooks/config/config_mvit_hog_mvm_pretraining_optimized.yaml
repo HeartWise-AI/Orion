@@ -1,0 +1,191 @@
+# MViT v2 S with Optimized HOG-based MaskFeat (MVM) Pretraining Configuration
+# Enhanced version with improved masking, learning schedule, and augmentation
+# Based on analysis of VideoMAE v2 and recent SSL video papers
+
+# Training parameters
+num_epochs: !!int 100  # Extended training for better SSL learning
+model_name: !!str mvit_v2_s
+data_filename: !!str data/deepcoro_balanced_all_classes.parquet
+output_dir: !!str "outputs_hog_mvm_pretrain_optimized"
+root: !!str "."
+datapoint_loc_label: !!str FileName
+device: !!str cuda
+seed: !!int 42
+resume: !!bool false
+binary_threshold: !!float 0.5
+
+# Dataset parameters
+apply_mask: !!bool false
+weighted_sampling: !!bool false
+debug: !!bool false
+test_time_augmentation: !!bool false
+run_test: !!bool false
+max_videos: !!null null  # Use all available videos in the dataset
+use_cached_hog: !!bool false  # Enable loading pre-computed HOG features
+
+# Task configuration - MVM with HOG targets for self-supervised pretraining
+task: !!str masked_video_modeling
+loss: !!str masked_video_modeling
+
+# Dummy labels for MVM (not used but might be required by data loading)
+target_label: !!null null
+label_loc_label: !!null null
+
+# MViT specific parameters
+frames: !!int 16  # MViT requires 16 frames
+resize: !!int 224  # MViT standard input size
+period: !!int 2
+pretrained: !!bool False  # Start from scratch for pretraining
+view_count: !!int 1  # Single view for standard training
+# Pre-computed from dataset to avoid recomputation
+mean: [99.63698, 99.63698, 99.63698]  # Computed from DeepCoro dataset
+std: [51.81118, 51.81118, 51.81118]  # Computed from DeepCoro dataset
+
+# Optimized MVM with HOG configuration
+mvm_config:
+  hidden_size: !!int 768  # MViT v2 S hidden dimension
+  decoder_hidden_size: !!int 384  # Lightweight decoder
+  decoder_layers: !!int 4
+  decoder_heads: !!int 6
+  mask_ratio: !!float 0.75  # Standard for MViT MVM
+  mask_type: !!str cube  # Random masking for MViT 
+  use_patch_projection: !!bool true  # Must be true for MViT
+  target_type: !!str hog  # HOG features as target (MaskFeat)
+  patch_size: !!int 16
+  num_frames: !!int 16
+  image_size: !!int 224
+  mask_token_learnable: !!bool true
+  norm_predict_loss: !!bool false  # HOG already normalized
+  
+  # Compromise HOG config - Sobel gradients but faster computation
+  hog_config:
+    orientations: !!int 9  # Standard HOG bins (MaskFeat paper default)
+    pixels_per_cell: [16, 16]  # Single cell per patch for speed (compromise)
+    cells_per_block: [1, 1]  # Simple single-cell blocks
+    block_norm: !!str L2  # L2 normalization (critical for contrast invariance)
+    use_color: !!bool false  # Grayscale for medical ultrasound images
+
+# Optimizer configuration with layer-wise decay
+optimizer: !!str AdamW
+weight_decay: !!float 0.01  # Reduced from 0.05 for more stable training
+betas: [0.9, 0.999]  # More stable betas for medical domain
+num_workers: !!int 8  # Increased for faster data loading with cached HOG
+batch_size: !!int 24 # Much larger batch size since we're not loading videos
+lr: !!float 0.0012  # Scaled up proportionally with batch size (0.0003 * 4)
+lr_schedule: !!str cosine
+scheduler_type: !!str cosine_warm_restart  # Better than plain cosine
+warmup_epochs: !!int 20  # Reduced from 30 for faster convergence
+min_lr: !!float 0.000001  # Lower min LR
+T_0: !!int 50  # For cosine warm restart - restart every 50 epochs
+T_mult: !!int 2  # Double the period after each restart
+
+# RoPE disabled for speed
+use_rope: !!bool false
+rope_base: !!float 10000.0
+rope_temporal_scale: !!float 2.0  # Increased from 1.0 - better for medical temporal dynamics
+rope_normalize_mode: !!str separate
+
+# Mixed precision for speed
+use_amp: !!bool true
+gradient_accumulation_steps: !!int 1  # No accumulation needed with batch size 128
+gradient_clip_val: !!float 1.0  # Increased from 0.02 for stable training
+
+# Enhanced data augmentation for SSL
+
+# Transforms using torchvision library (these are actually applied)
+transforms:
+  - transform: RandomAffine
+    params:
+      degrees: 10  # Rotation up to 10 degrees
+      translate: [0.1, 0.1]  # Translation up to 10% in x and y
+      scale: [0.9, 1.1]  # Scale between 90% and 110%
+      shear: 5  # Shear up to 5 degrees
+  - transform: ColorJitter
+    params:
+      brightness: 0.1  # Brightness variation
+      contrast: 0.1  # Contrast variation
+      saturation: 0.1  # Saturation variation
+      hue: 0.05  # Hue variation
+  - transform: RandomHorizontalFlip
+    params:
+      p: 0.5  # 50% chance of horizontal flip
+
+# Legacy augmentation parameters (not currently used but kept for reference)
+random_resized_crop: !!bool false
+random_crop_scale: [0.8, 1.0]  # Scale range for crops
+random_crop_ratio: [0.75, 1.33]  # Aspect ratio range
+rotation_degrees: !!int 5
+brightness: !!float 0.1
+contrast: !!float 0.1
+saturation: !!float 0.1
+hue: !!float 0.05
+random_erase_prob: !!float 0.0
+random_erase_scale: [0.02, 0.33]
+
+# Validation parameters with more frequent evaluation
+val_split: !!float 0.1
+eval_every_n_epochs: !!int 5
+save_best_model: !!bool true
+save_checkpoint_every_n_epochs: !!int 5  # More frequent checkpoints
+
+# EMA (Exponential Moving Average) for model weights
+use_ema: !!bool true
+ema_decay: !!float 0.9999  # EMA decay rate
+ema_update_freq: !!int 1  # Update EMA every batch
+
+# Logging
+project: !!str "orion-mvit-hog-mvm-optimized"
+entity: !!str "mhi_ai"
+ssl_log_interval: !!int 500  # Log more frequently with larger batch size
+
+# Optimized masking strategy
+masking_config:
+  strategy: !!str tube  # Tube masking for better temporal consistency
+  min_num_patches: !!int 16  # Minimum patches per mask
+  max_num_patches: !!int 64  # Increased max patches
+  min_aspect: !!float 0.5  # Wider aspect ratio range
+  max_aspect: !!float 2.0
+  temporal_consistency: !!float 0.8  # Probability of maintaining mask across frames
+
+# Frame sampling strategy for videos
+frame_sampling:
+  strategy: !!str uniform
+  clip_duration: !!float 2.0
+  clips_per_video: !!int 2  # Sample multiple clips per video
+
+# Early stopping (optional - usually not used in SSL)
+early_stopping:
+  enabled: !!bool false
+  patience: !!int 30  # Increased patience
+  min_delta: !!float 0.0001
+
+# Model saving
+save_strategy: !!str best_and_last  # Save both best and last
+keep_last_n_checkpoints: !!int 5  # Keep more checkpoints
+
+# Distributed training
+distributed: !!bool true
+backend: !!str nccl
+find_unused_parameters: !!bool true  # Needed for RoPE
+
+# Memory optimization
+pin_memory: !!bool true
+persistent_workers: !!bool true
+prefetch_factor: !!int 8  # Doubled for faster cached HOG loading
+drop_last: !!bool true  # Consistent batch sizes
+
+# HOG visualization settings
+visualize_hog:
+  enabled: !!bool true  # Enable visualization for wandb
+  num_samples: !!int 2  # Reduced samples to visualize
+  save_every_n_epochs: !!int 5  # Log every 5 epochs to reduce overhead
+  save_path: !!str "outputs_hog_mvm_pretrain_optimized/hog_visualizations"
+
+# Progressive training schedule (optional)
+progressive_training:
+  enabled: !!bool false
+  mask_ratio_schedule:  # Gradually increase mask ratio
+    0: 0.4  # Start with 40%
+    50: 0.5  # 50% at epoch 50
+    100: 0.6  # 60% at epoch 100
+    150: 0.65  # Final 65% at epoch 150

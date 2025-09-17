@@ -4,7 +4,7 @@
 # Training parameters
 num_epochs: !!int 30
 model_name: !!str mvit_v2_s
-data_filename: !!str /media/data1/datasets/CathEF/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days.csv
+data_filename: !!str /media/data1/ravram/CathEF_Retrain/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha.csv
 output_dir: !!str "outputs_mvit_mvm_finetune_regression"
 root: !!str "."
 datapoint_loc_label: !!str FileName
@@ -17,7 +17,7 @@ resume: !!bool false  # Not resuming from a checkpoint, loading pretrained weigh
 
 # Load pretrained MVM checkpoint
 pretrained: !!bool false  # Don't load ImageNet weights since we're loading from checkpoint
-checkpoint_path: !!str "outputs_mvm_pretrain/mvit_v2_s_8_16_2_AdamW_new_20250826-233853_wsr2fciq/checkpoint.pt"
+checkpoint_path: !!str "outputs_hog_mvm_pretrain_optimized/mvit_v2_s_24_16_2_AdamW_new_20250909-225222_tpxeuzg2/checkpoint_epoch_2.pt"
 load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
 
 # Task configuration - default task type (can be overridden per head)
@@ -51,8 +51,8 @@ frames: !!int 16  # MViT requires 16 frames
 resize: !!int 224  # Standard input size
 period: !!int 2
 view_count: !!int 1
-mean: [112.24039459228516, 112.24039459228516, 112.24039459228516]
-std: [39.012229919433594, 39.012229919433594, 39.012229919433594]
+mean: [99.63698, 99.63698, 99.63698]  # Computed from DeepCoro dataset
+std: [51.81118, 51.81118, 51.81118]  # Computed from DeepCoro dataset
 
 # Optimizer configuration for fine-tuning
 optimizer: !!str AdamW
@@ -68,8 +68,6 @@ warmup_epochs: !!int 5
 min_lr: !!float 0.000001
 
 # Layer-wise learning rate decay for better fine-tuning
-layer_decay: !!float 0.75  # Each layer gets lr * (layer_decay ^ depth)
-layer_decay_enabled: !!bool true
 
 # Gradual unfreezing for fine-tuning
 video_freeze_schedule: !!str linear
@@ -89,11 +87,7 @@ gradient_accumulation_steps: !!int 4
 gradient_clip_val: !!float 1.0
 
 # Data augmentation (lighter for fine-tuning)
-augment: !!bool true
 rand_augment: !!bool false
-crop_size: !!int 224
-horizontal_flip_prob: !!float 0.5
-vertical_flip_prob: !!float 0.0
 rotation_degrees: !!int 10
 brightness: !!float 0.1
 contrast: !!float 0.1

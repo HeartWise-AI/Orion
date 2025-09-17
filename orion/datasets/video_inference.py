@@ -109,9 +109,11 @@ class Video_inference(torch.utils.data.Dataset):
 
         self.fnames, self.outcome = [], []
 
-        df_dataset = pd.read_csv(
-            os.path.join(self.folder, self.filename), sep="α", engine="python"
-        )
+        data_path = os.path.join(self.folder, self.filename)
+        if data_path.endswith('.parquet'):
+            df_dataset = pd.read_parquet(data_path)
+        else:
+            df_dataset = pd.read_csv(data_path, sep="α", engine="python")
         self.header = list(df_dataset.columns)
         print("Header loaded successfully")
         if len(self.header) == 1:
@@ -377,9 +379,11 @@ class Video_Multi_inference(torch.utils.data.Dataset):
 
         self.fnames = []
 
-        df_dataset = pd.read_csv(
-            os.path.join(self.folder, self.filename), sep="α", engine="python"
-        )
+        data_path = os.path.join(self.folder, self.filename)
+        if data_path.endswith('.parquet'):
+            df_dataset = pd.read_parquet(data_path)
+        else:
+            df_dataset = pd.read_csv(data_path, sep="α", engine="python")
 
         filenameIndex = df_dataset.columns.get_loc(self.datapoint_loc_label + str(0))
         splitIndex = df_dataset.columns.get_loc("Split")

@@ -59,6 +59,14 @@ def loadvideo(filename: str) -> np.ndarray:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Check for invalid videos
+        if frame_count <= 0:
+            capture.release()
+            raise ValueError(f"Video has no frames: {filename} (frame_count={frame_count})")
+        if frame_width <= 0 or frame_height <= 0:
+            capture.release()
+            raise ValueError(f"Invalid video dimensions: {filename} (width={frame_width}, height={frame_height})")
 
         v = np.zeros((frame_count, frame_height, frame_width, 3), np.uint8)
 
@@ -168,29 +176,52 @@ def get_mean_and_std(
         * None
     """
 
+    print(f"Computing mean/std from {min(samples, len(dataset))} samples...")
+    
     if samples is not None and len(dataset) > samples:
         indices = np.random.choice(len(dataset), samples, replace=False)
         dataset = torch.utils.data.Subset(dataset, indices)
+        print(f"Using subset of {samples} videos from {len(dataset)} total")
 
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True
+        dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True,
+        pin_memory=True, persistent_workers=(num_workers > 0)
     )
 
     n = 0  # number of elements taken (should be equal to samples by end of for loop)
     s1 = 0.0  # sum of elements along channels (ends up as np.array of dimension (channels,))
-    s2 = 0.0  # sum of squares of elemenzts along channels (ends up as np.array of dimension (channels,))
-    # pdb.set_trace()
-    for x, *_ in tqdm.tqdm(dataloader):
-        # pdb.set_trace()
+    s2 = 0.0  # sum of squares of elements along channels (ends up as np.array of dimension (channels,))
+    
+    # Progress bar with better description
+    pbar = tqdm.tqdm(dataloader, desc="Computing dataset statistics", 
+                     total=len(dataloader), 
+                     unit="batch")
+    
+    for batch_idx, (x, *_) in enumerate(pbar):
+        # x shape: [batch, channels, frames, height, width]
         x = x.transpose(0, 1).contiguous().view(3, -1)
         n += x.shape[1]
         s1 += torch.sum(x, dim=1).numpy()
         s2 += torch.sum(x**2, dim=1).numpy()
+        
+        # Update progress bar with current mean estimate
+        current_mean = s1 / n if n > 0 else [0, 0, 0]
+        pbar.set_postfix({"mean": f"[{current_mean[0]:.1f}, {current_mean[1]:.1f}, {current_mean[2]:.1f}]",
+                          "pixels": f"{n:,}"})
+        
+        # Early exit if we have enough samples
+        if batch_idx >= (samples // batch_size):
+            print(f"Early exit after {batch_idx + 1} batches")
+            break
+    
     mean = s1 / n  # type: np.ndarray
     std = np.sqrt(s2 / n - mean**2)  # type: np.ndarray
 
     mean = mean.astype(np.float32)
     std = std.astype(np.float32)
+    
+    print(f"Final mean: {mean}")
+    print(f"Final std: {std}")
 
     return mean, std
 
@@ -201,21 +232,31 @@ def multi_get_mean_and_std(
     batch_size=8,
     num_workers=4,
 ):
+    print(f"Computing multi-view mean/std from {min(samples, len(dataset))} samples...")
+    
     if samples is not None and len(dataset) > samples:
         indices = np.random.choice(len(dataset), samples, replace=False)
         dataset = torch.utils.data.Subset(dataset, indices)
+        print(f"Using subset of {samples} videos from {len(dataset)} total")
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=True,
+        pin_memory=True, 
+        persistent_workers=(num_workers > 0)
     )
 
     # Initialize arrays to accumulate sums for each channel
     n, s1, s2 = 0, np.zeros(3), np.zeros(3)
+    
+    # Progress bar with better description
+    pbar = tqdm.tqdm(dataloader, desc="Computing multi-view statistics", 
+                     total=len(dataloader), 
+                     unit="batch")
 
-    for x, outcomes, fnames in tqdm.tqdm(dataloader):
+    for batch_idx, (x, outcomes, fnames) in enumerate(pbar):
         # Input shape: (num_views=2, batch_size=10, frames=72, channels=3, 256, 256)
         x = torch.stack(x)  # [num_views, batch, frames, channels, H, W]
 
@@ -227,6 +268,16 @@ def multi_get_mean_and_std(
         n += x_flat.shape[1]
         s1 += torch.sum(x_flat, dim=1).numpy()
         s2 += torch.sum(x_flat**2, dim=1).numpy()
+        
+        # Update progress bar with current mean estimate
+        current_mean = s1 / n if n > 0 else [0, 0, 0]
+        pbar.set_postfix({"mean": f"[{current_mean[0]:.1f}, {current_mean[1]:.1f}, {current_mean[2]:.1f}]",
+                          "pixels": f"{n:,}"})
+        
+        # Early exit if we have enough samples
+        if batch_idx >= (samples // batch_size):
+            print(f"Early exit after {batch_idx + 1} batches")
+            break
 
     # Calculate statistics per channel
     mean = s1 / n
@@ -235,6 +286,9 @@ def multi_get_mean_and_std(
     # Convert to float32
     mean = mean.astype(np.float32)
     std = std.astype(np.float32)
+    
+    print(f"Final multi-view mean: {mean}")
+    print(f"Final multi-view std: {std}")
 
     return mean, std
 

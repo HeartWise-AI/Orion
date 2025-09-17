@@ -4,7 +4,7 @@
 # Training parameters
 num_epochs: !!int 25
 model_name: !!str mvit_v2_s
-data_filename: !!str data/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days_sample_400.csv
+data_filename: !!str /media/data1/datasets/CathEF/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha_filtered_30days.csv
 output_dir: !!str "outputs_x3d_debug_binary"
 root: !!str "."
 datapoint_loc_label: !!str FileName
@@ -15,8 +15,8 @@ seed: !!int 42
 resume: !!bool false  # Not resuming, loading from MVM checkpoint instead
 
 # Load pretrained weights
-pretrained: !!bool true
-checkpoint_path: !!str "outputs_mvm_pretrain/mvit_v2_s_8_16_2_AdamW_new_20250826-233853_wsr2fciq/checkpoint.pt"
+pretrained: !!bool false
+checkpoint_path: !!str "outputs_hog_mvm_pretrain_optimized/mvit_v2_s_24_16_2_AdamW_new_20250909-225222_tpxeuzg2/checkpoint_epoch_2.pt"
 load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
 
 # 3D RoPE Configuration (enabled for MViT)
@@ -39,6 +39,16 @@ head_task:
   y_true_cat: !!str classification
   Value: !!str regression
 
+# Regression head bias initialization (optional)
+# Used to initialize regression heads near expected output range
+regression_head_bias:
+  Value: !!float 0.5  # Initialize near mean LVEF/10 (scaled value)
+
+# Regression value scaling (optional)
+# Scales regression values during data loading (e.g., divide LVEF by 10)
+regression_value_scale:
+  Value: !!float 0.01  # Divide by 100 (multiply by 0.01)
+
 # Loss structure configuration
 loss_structure:
   y_true_cat: !!str bce_logit
@@ -46,7 +56,7 @@ loss_structure:
 
 # Head weights configuration
 head_weights:
-  y_true_cat: !!float 1.0
+  y_true_cat: !!float 2.0
   Value: !!float 1.0
 
 frames: !!int 16  
@@ -60,7 +70,7 @@ std: [40.97189, 40.97189, 40.97189]
 optimizer: !!str AdamW
 weight_decay: !!float 0.0003845182987994549  # Proven working value
 num_workers: !!int 8
-batch_size: !!int 16 
+batch_size: !!int 32 
 lr: !!float 0.00002786988178725705  # Proven working learning rate
 
 # Learning rate scheduler
@@ -73,11 +83,6 @@ use_amp: !!bool true
 gradient_accumulation_steps: !!int 4
 gradient_clip_val: !!float 1.0
 
-# Data augmentation (minimal for debugging)
-augment: !!bool false
-crop_size: !!int 224
-horizontal_flip_prob: !!float 0.0
-vertical_flip_prob: !!float 0.0
 
 # Validation parameters
 val_split: !!float 0.2
@@ -120,3 +125,12 @@ labels_map:
     0: !!int 0
     1: !!int 1
   Value: !!null null  # Null for regression column
+  
+transforms:
+  - transform: RandomAffine
+    params:
+      degrees: 30
+      translate: [0.0, 0.1]
+      scale: [0.9, 1.1]
+      shear: [0, 20]
+      fill: null

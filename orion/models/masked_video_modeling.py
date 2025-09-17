@@ -84,14 +84,23 @@ class MaskedVideoModeling(nn.Module):
         
         # Setup target-specific components
         if target_type == "hog":
-            # HOG feature extractor
-            from .hog_features import HOGFeatureExtractor
-            hog_config = hog_config or {}
-            self.hog_extractor = HOGFeatureExtractor(
-                patch_size=patch_size,
-                image_size=image_size,
-                **hog_config
-            )
+            # Use ultra-fast cached HOG for speed
+            use_cached = hog_config.get('use_cached', False)
+            if use_cached:
+                from .cached_hog import CachedHOGExtractor
+                self.hog_extractor = CachedHOGExtractor(
+                    orientations=hog_config.get('orientations', 6),
+                    pixels_per_cell=hog_config.get('pixels_per_cell', (16, 16)),
+                    patch_size=patch_size,
+                    image_size=image_size,
+                )
+            else:
+                from .hog_features import HOGFeatureExtractor
+                self.hog_extractor = HOGFeatureExtractor(
+                    patch_size=patch_size,
+                    image_size=image_size,
+                    **hog_config
+                )
             # Prediction head for HOG features
             self.predict_head = nn.Linear(decoder_hidden_size, self.hog_extractor.output_dim)
         elif use_patch_projection:
@@ -428,7 +437,8 @@ class MaskedVideoModeling(nn.Module):
         self, 
         x: torch.Tensor,
         encoder_model: Optional[nn.Module] = None,
-        mask_ratio: Optional[float] = None
+        mask_ratio: Optional[float] = None,
+        cached_hog_features: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass of masked video modeling.
@@ -437,6 +447,7 @@ class MaskedVideoModeling(nn.Module):
             x: Input video [B, C, T, H, W] or features [B, N, D]
             encoder_model: Optional encoder model for feature extraction
             mask_ratio: Ratio of tokens to mask (uses self.mask_ratio if None)
+            cached_hog_features: Pre-computed HOG features [B, T, num_patches, hog_dim]
             
         Returns:
             dict: Contains loss and other outputs
@@ -459,49 +470,52 @@ class MaskedVideoModeling(nn.Module):
                 
                 # Create target based on target_type
                 if self.target_type == "hog":
-                    # For HOG with encoder (like MViT), we need to match encoder output dimensions
-                    with torch.no_grad():
-                        B, C, T, H, W = x.shape
+                    # Use cached HOG features if available
+                    if cached_hog_features is not None:
+                        # cached_hog_features is [B, T, num_patches, hog_dim]
+                        B, T_hog, N_patches, D_hog = cached_hog_features.shape
+                        target = cached_hog_features.reshape(B, T_hog * N_patches, D_hog)
+                        # Log first few batches to confirm
+                        import random
+                        if random.random() < 0.5:  # 50% chance to log
+                            print(f"[MVM] ✅ USING CACHED HOG from disk: shape {cached_hog_features.shape}")
                         
-                        # Extract HOG features for full resolution
-                        hog_targets = []
-                        for t in range(T):
-                            frame_hog = self.hog_extractor(x[:, :, t])  # [B, num_patches_orig, hog_dim]
-                            hog_targets.append(frame_hog)
-                        
-                        # Stack and reshape HOG targets
-                        full_hog = torch.stack(hog_targets, dim=1)  # [B, T, num_patches_orig, hog_dim]
-                        B, T_hog, N_patches, D_hog = full_hog.shape
-                        
-                        # Adaptive pooling to match encoder output tokens
-                        # Reshape to spatial grid for pooling
-                        h_patches = w_patches = int(np.sqrt(N_patches))
-                        full_hog = full_hog.view(B * T_hog, h_patches, w_patches, D_hog)
-                        full_hog = full_hog.permute(0, 3, 1, 2)  # [B*T, D_hog, H, W]
-                        
-                        # Calculate target spatial size based on encoder tokens
-                        # MViT has hierarchical structure, approximate spatial dims
-                        if num_tokens == 393:  # MViT specific
-                            # 392 spatial + 1 CLS, approximate as closest factorizable
-                            target_size = int(np.sqrt(num_tokens - 1))  # Roughly 19x19 grid
-                            if target_size * target_size < num_tokens - 1:
-                                target_size += 1
-                        else:
-                            target_size = int(np.sqrt(num_tokens))
-                        
-                        # Adaptive pooling to match encoder dimensions
-                        pooled_hog = F.adaptive_avg_pool2d(full_hog, (target_size, target_size))
-                        pooled_hog = pooled_hog.permute(0, 2, 3, 1)  # [B*T, H', W', D_hog]
-                        pooled_hog = pooled_hog.reshape(B, -1, D_hog)  # [B, T*H'*W', D_hog]
-                        
-                        # Truncate or pad to match exact token count
-                        if pooled_hog.shape[1] > num_tokens:
-                            target = pooled_hog[:, :num_tokens]
-                        elif pooled_hog.shape[1] < num_tokens:
-                            padding = torch.zeros(B, num_tokens - pooled_hog.shape[1], D_hog, device=pooled_hog.device)
-                            target = torch.cat([pooled_hog, padding], dim=1)
-                        else:
-                            target = pooled_hog
+                        # Truncate or pad to match encoder tokens if needed
+                        if target.shape[1] > num_tokens:
+                            target = target[:, :num_tokens]
+                        elif target.shape[1] < num_tokens:
+                            padding = torch.zeros(B, num_tokens - target.shape[1], D_hog, device=target.device)
+                            target = torch.cat([target, padding], dim=1)
+                    else:
+                        # For HOG with encoder (like MViT), we need to match encoder output dimensions
+                        import random
+                        if random.random() < 0.5:  # 50% chance to log
+                            print(f"[MVM] ⚠️ COMPUTING HOG on-the-fly (no cache) for batch size {x.shape[0]}")
+                        with torch.no_grad():
+                            B, C, T, H, W = x.shape
+                            
+                            # Extract HOG for center patch of each space-time cube
+                            # This matches the MaskFeat paper approach
+                            hog_list = []
+                            for t in range(T):
+                                frame_hog = self.hog_extractor(x[:, :, t, :, :])  # [B, num_patches, hog_dim]
+                                hog_list.append(frame_hog)
+                            
+                            full_hog = torch.stack(hog_list, dim=1)  # [B, T, num_patches, hog_dim]
+                            B, T_hog, N_patches, D_hog = full_hog.shape
+                            
+                            # Reshape for processing
+                            full_hog = full_hog.reshape(B, T_hog * N_patches, D_hog)  # [B, T*num_patches, hog_dim]
+                            
+                            # Skip complex pooling - just use the flattened features
+                            target = full_hog
+                            
+                            # Truncate or pad to match encoder tokens if needed
+                            if target.shape[1] > num_tokens:
+                                target = target[:, :num_tokens]
+                            elif target.shape[1] < num_tokens:
+                                padding = torch.zeros(B, num_tokens - target.shape[1], D_hog, device=target.device)
+                                target = torch.cat([target, padding], dim=1)
                             
                 elif self.use_patch_projection:
                     target = self.patchify(x)
@@ -515,15 +529,19 @@ class MaskedVideoModeling(nn.Module):
                 latent, mask, ids_restore = self.random_masking(target, mask_ratio)
                 
                 if self.target_type == "hog":
-                    # Extract HOG for patch-based approach
+                    # Extract HOG for all frames (fast vectorized)
                     with torch.no_grad():
                         B, C, T, H, W = x.shape
-                        hog_targets = []
-                        for t in range(T):
-                            frame_hog = self.hog_extractor(x[:, :, t])
-                            hog_targets.append(frame_hog)
-                        target = torch.stack(hog_targets, dim=1)
-                        target = target.view(B, -1, target.shape[-1])
+                        
+                        # Reshape to batch all frames together for speed
+                        x_flat = x.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+                        
+                        # Process all frames at once
+                        target_flat = self.hog_extractor(x_flat)  # [B*T, num_patches, hog_dim]
+                        
+                        # Reshape back
+                        target = target_flat.reshape(B, T, -1, target_flat.shape[-1])  # [B, T, num_patches, hog_dim]
+                        target = target.reshape(B, -1, target.shape[-1])  # [B, T*num_patches, hog_dim]
         else:  # Feature input [B, N, D]
             target = x
             latent, mask, ids_restore = self.random_masking(x, mask_ratio)

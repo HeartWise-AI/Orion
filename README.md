@@ -77,19 +77,45 @@ If you're migrating from an older version using Poetry, see [MIGRATION_TO_UV.md]
 
 ## Usage
 
-You can use Orion either through a Python script 
-```bash
-python run_sweep.py
-python run_inference.py
+You can use Orion for:
+- Training models with various configurations
+- Running hyperparameter sweeps with W&B
+- Running inference on trained models
+- Building custom notebooks using code samples in `notebooks/`
+
+### Configuration Files
+
+See `notebooks/config/` for different configuration examples:
+- `config_x3d_debug_binary_classification.yaml` - Mixed classification/regression with X3D
+- `config_mvit_mvm_pretraining.yaml` - Masked video modeling pretraining
+- `sweep_config.yaml` - Hyperparameter sweep configuration
+- `inference_config_template.yaml` - Template for inference runs
+
+#### Multi-Head Support (Classification + Regression)
+
+Orion supports training models with multiple output heads for different tasks simultaneously:
+
+```yaml
+# Define output structure for each head
+head_structure:
+  y_true_cat: 1  # Binary classification head
+  Value: 1       # Regression head (e.g., LVEF prediction)
+
+# Specify task type for each head
+head_task:
+  y_true_cat: classification
+  Value: regression
+
+# Configure loss function for each head
+loss_structure:
+  y_true_cat: bce_logit  # Binary cross-entropy for classification
+  Value: l1              # L1 loss for regression
+
+# Set loss weights
+head_weights:
+  y_true_cat: 1.0
+  Value: 1.0
 ```
-
-or build your own Jupyter notebook inspired by code samples in the `notebooks/` folder.
-
-### Configuration file example
-
-See `notebooks/config/` for different config.YAML file examples. Here are some key configuration parameters:
-
-\[... keep the existing parameter descriptions ...\]
 
 ### Model-Specific Configurations
 
@@ -120,17 +146,21 @@ Different video models have specific requirements and recommendations for optima
 
 When configuring your model in the YAML file, ensure that the `frames` and `resize` parameters align with these recommendations. The `lr` (learning rate) parameter should be set within the recommended range for best results.
 
-### Using a Python Script
+### Training Models
 
-1. Prepare your configuration file in YAML format.
-
-2. Run the main script with torchrun:
-
+1. **Single GPU Training**:
    ```bash
-   torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
+   python orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
    ```
 
-   This command runs the script in a distributed manner with 2 GPU processes on a single node.
+2. **Distributed Training** (multiple GPUs):
+   ```bash
+   # Using 2 GPUs
+   torchrun --standalone --nnodes=1 --nproc-per-node=2 orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
+   
+   # Using 4 GPUs
+   torchrun --standalone --nnodes=1 --nproc-per-node=4 orion/utils/video_training_and_eval.py --config_path=notebooks/config/config.yaml
+   ```
 
 ### GPU Selection
 
@@ -171,13 +201,28 @@ You can specify which GPUs to use in multiple ways:
 3. Define a class for your command-line arguments.
 4. Load your configuration, create transforms, initialize a wandb run, and run the main process.
 
-### Using Weights & Biases Sweeps
+### Hyperparameter Sweeps with Weights & Biases
 
-1. Prepare your configuration and sweep configuration files in YAML format.
-2. Run the `run_sweep.py` script to start the sweep agent (no argument needed - update the `sweep_conf_file_path` variable in the script to point to your sweep configuration file).
+Orion supports multi-GPU sweeps without creating duplicate runs:
+
+1. **Configure your sweep** in `notebooks/config/sweep_config.yaml`
+
+2. **Run sweep experiments**:
    ```bash
+   # Single experiment with 1 GPU (default)
    python run_sweep.py
+   
+   # Run 5 experiments with 1 GPU
+   python run_sweep.py 5
+   
+   # Run 10 experiments with 4 GPUs each
+   NGPUS=4 python run_sweep.py 10
+   
+   # Run 20 experiments with 12 GPUs each
+   NGPUS=12 python run_sweep.py 20
    ```
+
+   The sweep system properly handles distributed training, ensuring only the primary process (rank 0) reports to W&B.
 
 ### Inference and Evaluation
 

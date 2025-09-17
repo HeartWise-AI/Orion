@@ -1,0 +1,65 @@
+program:
+  orion/utils/video_training_and_eval.py
+name: "Loss_Weight_Focused_Bayes"
+method: "bayes"
+metric:
+  name: "best_val_loss" 
+  goal: "minimize"
+parameters:
+  model_name:
+    values: ["mvit_v2_s"]
+  
+  # More focused weight search for Bayesian optimization
+  # Since regression values are scaled to 0-1, regression might need higher weight
+  head_weights_y_true_cat:
+    distribution: "uniform"
+    min: 0.1
+    max: 10.0
+  head_weights_Value:
+    distribution: "uniform"
+    min: 0.5
+    max: 50.0  # Allow higher weights for regression since values are scaled
+  
+  # Alternative: Use log scale for better exploration
+  # head_weights_y_true_cat:
+  #   distribution: "log_uniform_values"
+  #   min: 0.1
+  #   max: 10.0
+  # head_weights_Value:
+  #   distribution: "log_uniform_values"  
+  #   min: 0.5
+  #   max: 100.0
+  
+  # All other parameters fixed
+  lr:
+    values: [0.00002786988178725705]
+  scheduler_type:
+    values: ["cosine_warm_restart"]
+  optimizer:
+    values: ["AdamW"]
+  weight_decay:
+    values: [0.0003845182987994549]
+  batch_size:
+    values: [16]
+  gradient_accumulation_steps:
+    values: [4]
+  period:
+    values: [2]
+  regression_head_bias_Value:
+    values: [0.5]
+  regression_value_scale_Value:
+    values: [0.01]
+  num_epochs:
+    values: [15]  # Shorter for sweep efficiency
+
+early_terminate:
+  type: hyperband
+  s: 2
+  eta: 3
+  min_iter: 5
+
+command:
+  - notebooks/config/runner_sweep.sh
+  - ${program}
+  - "notebooks/config/config_x3d_debug_binary_classification.yaml"
+  - ${args}

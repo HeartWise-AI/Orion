@@ -69,9 +69,111 @@ class HOGFeatureExtractor(nn.Module):
             cells_per_block[0] * cells_per_block[1]
         )
         
-        # For PyTorch implementation
-        if not SKIMAGE_AVAILABLE:
-            self._init_pytorch_hog()
+        # Always initialize PyTorch implementation for batch processing
+        self._init_pytorch_hog()
+    
+    def _pytorch_hog_fast(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Fast PyTorch HOG - optimized Sobel gradients as per MaskFeat paper.
+        
+        Args:
+            images: Tensor of shape [B, C, H, W]
+        
+        Returns:
+            HOG features of shape [B, num_patches, hog_dim]
+        """
+        B, C, H, W = images.shape
+        device = images.device
+        
+        # Convert to grayscale if needed
+        if not self.use_color and C == 3:
+            images = 0.299 * images[:, 0] + 0.587 * images[:, 1] + 0.114 * images[:, 2]
+            images = images.unsqueeze(1)
+            C = 1
+        
+        # Compute Sobel gradients (proper edge detection as per paper)
+        dx = F.conv2d(images.view(-1, 1, H, W), self.sobel_x[:1], padding=1)
+        dy = F.conv2d(images.view(-1, 1, H, W), self.sobel_y[:1], padding=1)
+        dx = dx.view(B, C, H, W)
+        dy = dy.view(B, C, H, W)
+        
+        # Magnitude and orientation
+        magnitude = torch.sqrt(dx**2 + dy**2 + 1e-6)
+        orientation = torch.atan2(dy, dx)
+        orientation = (orientation + np.pi) % np.pi  # [0, pi]
+        
+        # Extract all patches at once using unfold
+        mag_patches = F.unfold(magnitude, kernel_size=self.patch_size, stride=self.patch_size)
+        ori_patches = F.unfold(orientation, kernel_size=self.patch_size, stride=self.patch_size)
+        
+        # Reshape: [B, patch_size^2, num_patches] -> [B, num_patches, patch_size, patch_size]
+        num_patches = (H // self.patch_size) * (W // self.patch_size)
+        mag_patches = mag_patches.permute(0, 2, 1).reshape(B, num_patches, self.patch_size, self.patch_size)
+        ori_patches = ori_patches.permute(0, 2, 1).reshape(B, num_patches, self.patch_size, self.patch_size)
+        
+        # Check if we're using simplified single-cell mode for speed
+        if self.pixels_per_cell[0] == self.patch_size:
+            # Fast path: single cell per patch
+            # Flatten patches for histogram computation
+            mag_flat = mag_patches.reshape(B, num_patches, -1)
+            ori_flat = ori_patches.reshape(B, num_patches, -1)
+            
+            # Compute histogram with vectorized operations
+            bin_width = np.pi / self.orientations
+            bin_idx = (ori_flat / bin_width).long().clamp(0, self.orientations - 1)
+            
+            # Create histograms using scatter_add
+            hog_features = torch.zeros(B, num_patches, self.orientations, device=device)
+            for b in range(B):
+                for p in range(num_patches):
+                    hog_features[b, p].scatter_add_(0, bin_idx[b, p], mag_flat[b, p])
+        else:
+            # Full path: multiple cells per patch (slower but more accurate)
+            cells_h = cells_w = self.patch_size // self.pixels_per_cell[0]
+            cell_h = cell_w = self.pixels_per_cell[0]
+            
+            # Reshape into cells: [B, num_patches, cells_h, cell_h, cells_w, cell_w]
+            mag_cells = mag_patches.reshape(B, num_patches, cells_h, cell_h, cells_w, cell_w)
+            ori_cells = ori_patches.reshape(B, num_patches, cells_h, cell_h, cells_w, cell_w)
+            
+            # Permute and reshape for processing: [B, num_patches, cells_h*cells_w, cell_h*cell_w]
+            mag_cells = mag_cells.permute(0, 1, 2, 4, 3, 5).reshape(B, num_patches, cells_h*cells_w, cell_h*cell_w)
+            ori_cells = ori_cells.permute(0, 1, 2, 4, 3, 5).reshape(B, num_patches, cells_h*cells_w, cell_h*cell_w)
+            
+            # Compute histograms for all cells (vectorized)
+            bin_width = np.pi / self.orientations
+            hog_features = []
+            
+            for cell_idx in range(cells_h * cells_w):
+                # Get magnitudes and orientations for this cell across all patches
+                cell_mag = mag_cells[:, :, cell_idx, :].reshape(B, num_patches, -1)
+                cell_ori = ori_cells[:, :, cell_idx, :].reshape(B, num_patches, -1)
+                
+                # Compute histogram with soft binning
+                hist = torch.zeros(B, num_patches, self.orientations, device=device)
+                
+                # Soft binning computation
+                bin_pos = cell_ori / bin_width
+                bin_low = torch.floor(bin_pos).long() % self.orientations
+                bin_high = (bin_low + 1) % self.orientations
+                weight_high = bin_pos - bin_low.float()
+                weight_low = 1.0 - weight_high
+                
+                # Accumulate using scatter_add (much faster than loops)
+                for b in range(B):
+                    for p in range(num_patches):
+                        hist[b, p].scatter_add_(0, bin_low[b, p], cell_mag[b, p] * weight_low[b, p])
+                        hist[b, p].scatter_add_(0, bin_high[b, p], cell_mag[b, p] * weight_high[b, p])
+                
+                hog_features.append(hist)
+            
+            # Concatenate all cell histograms: [B, num_patches, cells * orientations]
+            hog_features = torch.cat(hog_features, dim=-1)
+        
+        # L2 normalization per patch (critical for contrast invariance)
+        hog_features = F.normalize(hog_features + 1e-5, p=2, dim=-1)
+        
+        return hog_features
     
     def _init_pytorch_hog(self):
         """Initialize PyTorch-based HOG filters."""
@@ -91,6 +193,7 @@ class HOGFeatureExtractor(nn.Module):
         # Orientation bins
         self.register_buffer('bin_centers', 
                            torch.linspace(0, np.pi, self.orientations, dtype=torch.float32))
+    
     
     def _pytorch_hog(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -197,9 +300,9 @@ class HOGFeatureExtractor(nn.Module):
         B, C = magnitude.shape[:2]
         device = magnitude.device
         
-        # Flatten spatial dimensions
-        mag_flat = magnitude.view(B, C, -1)  # [B, C, cell_size]
-        ori_flat = orientation.view(B, C, -1)
+        # Flatten spatial dimensions - use reshape for non-contiguous tensors
+        mag_flat = magnitude.reshape(B, C, -1)  # [B, C, cell_size]
+        ori_flat = orientation.reshape(B, C, -1)
         
         # Compute bin assignments and weights
         bin_width = np.pi / self.orientations
@@ -287,21 +390,27 @@ class HOGFeatureExtractor(nn.Module):
         Returns:
             HOG features [B, num_patches, hog_dim] or [B, T, num_patches, hog_dim] for videos
         """
-        # Handle video input
+        # Handle video input - batch process all frames at once for efficiency
         if images.dim() == 5:
             B, C, T, H, W = images.shape
-            # Process frame by frame
-            hog_features = []
-            for t in range(T):
-                frame_hog = self.forward(images[:, :, t])
-                hog_features.append(frame_hog)
-            return torch.stack(hog_features, dim=1)  # [B, T, num_patches, hog_dim]
+            
+            # Reshape to process all frames in a single batch
+            images_reshaped = images.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+            
+            # Always use PyTorch implementation for batch efficiency
+            # Process all frames at once
+            hog_features_flat = self._pytorch_hog(images_reshaped)
+            
+            # Reshape back to [B, T, num_patches, hog_dim]
+            num_patches = hog_features_flat.shape[1]
+            hog_dim = hog_features_flat.shape[2]
+            hog_features = hog_features_flat.reshape(B, T, num_patches, hog_dim)
+            
+            return hog_features
         
-        # Use appropriate implementation
-        if SKIMAGE_AVAILABLE:
-            hog_features = self._skimage_hog(images)
-        else:
-            hog_features = self._pytorch_hog(images)
+        # Single image processing - use fast PyTorch implementation
+        # This is the most common case for MaskFeat (center frame only)
+        hog_features = self._pytorch_hog_fast(images)
         
         return hog_features
     

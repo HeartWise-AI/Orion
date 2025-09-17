@@ -28,4 +28,4 @@ apply_mask: false
 view_count: null
 save_best: loss
 resume: false
-target_label: Outcome
+target_label: Outcomecd 

@@ -1,33 +1,45 @@
 program:
   orion/utils/video_training_and_eval.py
-name: "CathEF_Optimized_Sweep"
-method: "bayes" # grid, random
+name: "Loss_Weight_Bayes_Sweep"
+method: "bayes" # Bayesian optimization for efficient search
 metric:
   name: "best_val_loss"
   goal: "minimize"
 parameters:
   model_name:
-    values: ["mvit_v2_s"]  # Added x3d_m and mvit_v2_s
+    values: ["mvit_v2_s"]
+  
+  # Loss weight ratios - use log distributions for better exploration
+  # Bayesian optimization will learn which ratios work best
+  head_weights_y_true_cat:
+    distribution: "log_uniform_values"
+    min: 0.01
+    max: 100.0
+  head_weights_Value:
+    distribution: "log_uniform_values"
+    min: 0.01
+    max: 100.0
+  # This allows exploring ratios from 1:10000 to 10000:1
+  
+  # Fixed hyperparameters (using your proven values)
   lr:
-    distribution: "uniform"
-    min: 0.00001
-    max: 0.00005  # Narrowed range around proven value 2.78e-5
-  rand_augment:
-    values: [True, False]
+    values: [0.00002786988178725705]  # Your proven LR
   scheduler_type:
-    values: ["cosine_warm_restart", "cosine", "step"]  # cosine_warm_restart first (proven best)
+    values: ["cosine_warm_restart"]  # Your proven scheduler
   optimizer:
-    values: ["AdamW"]  # AdamW proven to work best
+    values: ["AdamW"]
   weight_decay:
-    distribution: "uniform"
-    min: 0.0001  # Around proven value 3.84e-4
-    max: 0.0005
+    values: [0.0003845182987994549]  # Your proven weight decay
   batch_size:
-    values: [12, 16, 24]  # 6 is proven, but test nearby values
-  gradient_accumulation_steps:
-    values: [2, 4]  # For effective batch size management
+    values: [16,32,64]
   period:
-    values: [1, 2, 3]
+    values: [1,2,3]
+  
+  # Regression-specific parameters (fixed)
+  regression_head_bias_Value:
+    values: [0.5]
+  regression_value_scale_Value:
+    values: [0.01]
 early_terminate:
   type: hyperband
   min_iter: 5  # Increased from 3 to allow more training

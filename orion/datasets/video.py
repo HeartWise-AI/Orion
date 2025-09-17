@@ -9,6 +9,7 @@ import torch
 import torch.utils.data
 import torchvision
 from torchvision.transforms import v2
+import cv2
 
 # Global variable for directory paths
 dir2 = os.path.abspath("/volume/Orion/orion")
@@ -75,6 +76,11 @@ class Video(torch.utils.data.Dataset):
         weighted_sampling=False,
         normalize=True,
         debug=False,
+        regression_value_scale=None,
+        head_task=None,
+        max_videos=None,
+        use_cached_hog=False,
+        hog_cache_dir="hog_features_cache",
     ) -> None:
         # Initialize instance variables
         self.folder = pathlib.Path(root)
@@ -110,17 +116,46 @@ class Video(torch.utils.data.Dataset):
         self.weighted_sampling = weighted_sampling
         self.debug = debug
         self.normalize = normalize
+        
+        # Store regression scaling and task type info
+        self.regression_value_scale = regression_value_scale or {}
+        self.head_task = head_task or {}
+        self.max_videos = max_videos
+        self.use_cached_hog = use_cached_hog
+        self.hog_cache_dir = hog_cache_dir
+        
+        # Check HOG cache if enabled
+        if self.use_cached_hog:
+            if os.path.exists(hog_cache_dir):
+                print(f"[Video Dataset] Using cached HOG features from: {hog_cache_dir}")
+            else:
+                print(f"[Video Dataset] Warning: HOG cache dir not found: {hog_cache_dir}")
+                self.use_cached_hog = False
 
         self.fnames, self.outcome = [], []
         if split == "external_test":
             self.fnames = sorted(os.listdir(self.external_test_location))
         else:
-            with open(os.path.join(self.folder, self.filename)) as f:
-                self.header = f.readline().strip().split("α")
-                if len(self.header) == 1:
-                    raise ValueError(
-                        "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
-                    )
+            # Read header based on file type
+            file_path = os.path.join(self.folder, self.filename)
+            print(f"[Video Dataset] Reading file: {file_path}")
+            if file_path.endswith('.parquet'):
+                # For parquet files, read the columns directly
+                import pandas as pd
+                import pyarrow.parquet as pq
+                print(f"[Video Dataset] Loading parquet metadata...")
+                # Get schema without loading data
+                parquet_file = pq.ParquetFile(file_path)
+                self.header = parquet_file.schema.names
+                print(f"[Video Dataset] Found {len(self.header)} columns: {self.header[:5]}...")
+            else:
+                # For CSV files, read the first line
+                with open(file_path) as f:
+                    self.header = f.readline().strip().split("α")
+                    if len(self.header) == 1:
+                        raise ValueError(
+                            "Header was not split properly. Please ensure the file uses 'α' (alpha) as the delimiter."
+                        )
 
             self.fnames, self.outcomes, self.target_indices = self.load_data(
                 split, self.target_label
@@ -154,10 +189,24 @@ class Video(torch.utils.data.Dataset):
         Returns:
             tuple: (filenames, outcomes, target_indices)
         """
-        # Read the "α" separated file using pandas
+        # Read the data file - support both CSV and Parquet formats
         file_path = os.path.join(self.folder, self.filename)
-        data = pd.read_csv(file_path, sep="α", engine="python")
+        print(f"[load_data] Loading data from: {file_path}")
+        if file_path.endswith('.parquet'):
+            print(f"[load_data] Reading parquet file...")
+            data = pd.read_parquet(file_path)
+            print(f"[load_data] Loaded {len(data)} rows from parquet")
+        else:
+            # Default to "α" separated CSV
+            data = pd.read_csv(file_path, sep="α", engine="python")
 
+        # Filter data by split FIRST for efficiency
+        if split.lower() != "all":
+            print(f"[load_data] Filtering for {split} split...")
+            # Case-insensitive comparison
+            data = data[data['Split'].str.lower() == split.lower()]
+            print(f"[load_data] Filtered to {len(data)} rows for {split}")
+        
         filename_index = data.columns.get_loc(self.datapoint_loc_label)
         split_index = data.columns.get_loc("Split")
 
@@ -176,26 +225,64 @@ class Video(torch.utils.data.Dataset):
         self.fnames = []
         self.outcome = []
 
-        # Iterate through rows using iterrows
-        for index, row in data.iterrows():
-            file_name = row.iloc[filename_index]
-            file_mode = row.iloc[split_index].lower()
-
-            if split in ["all", file_mode] and os.path.exists(file_name):
-                self.fnames.append(file_name)
-                if target_indices is not None:
-                    # For multi-head, create a dictionary of outcomes
-                    outcomes = {}
-                    for label, idx in target_indices.items():
-                        outcomes[label] = row.iloc[idx]
-                    self.outcome.append(outcomes)
-
+        # Use vectorized operations instead of iterrows for speed
+        print(f"[load_data] Processing {len(data)} rows...")
+        
+        # Apply max_videos limit if specified
+        if self.max_videos is not None and len(data) > self.max_videos:
+            print(f"[load_data] Limiting dataset from {len(data)} to {self.max_videos} videos")
+            data = data.iloc[:self.max_videos]
+        
+        # Get all filenames at once
+        self.fnames = data[self.datapoint_loc_label].tolist()
+        
+        # For SSL tasks, we don't need outcomes
+        if target_indices is None:
+            self.outcome = [None] * len(self.fnames)
+        else:
+            # Get outcomes for each target
+            self.outcome = []
+            for _, row in data.iterrows():
+                outcomes = {}
+                for label, idx in target_indices.items():
+                    outcomes[label] = row.iloc[idx]
+                self.outcome.append(outcomes)
+        
+        print(f"[load_data] Loaded {len(self.fnames)} video paths")
         return self.fnames, self.outcome, target_indices
 
     def __getitem__(self, index):
         # Find filename of video
         video_fname = self.fnames[index]
-
+        
+        # Load cached HOG features if enabled
+        cached_hog = None
+        skip_video_loading = False
+        if self.use_cached_hog:
+            from pathlib import Path
+            # Extract just the DICOM ID from the full path
+            # The cache uses the stem without extension
+            video_name = Path(video_fname).stem
+            cache_path = os.path.join(self.hog_cache_dir, f"{video_name}_hog.npz")
+            
+            if os.path.exists(cache_path):
+                try:
+                    data = np.load(cache_path)
+                    cached_hog = data['hog_features'].astype(np.float32)
+                    # Convert to tensor [frames, num_patches, hog_dim]
+                    cached_hog = torch.from_numpy(cached_hog)
+                    skip_video_loading = True  # Skip video loading when HOG is cached
+                    if index == 0:  # Log once per epoch
+                        print(f"[HOG Cache] Loaded features from cache: shape {cached_hog.shape}, skipping video load")
+                except Exception as e:
+                    if index == 0:
+                        print(f"[HOG Cache] Failed to load cache: {e}")
+                    cached_hog = None
+            else:
+                if index < 5:  # Log first few missing
+                    print(f"[HOG Cache] Cache file not found: {cache_path}")
+        
+        # Always load video - we need it for the encoder even with cached HOG
         video = orion.utils.loadvideo(video_fname).astype(np.float32)
 
         if self.apply_mask:
@@ -283,8 +370,19 @@ class Video(torch.utils.data.Dataset):
         if self.target_label is not None:
             # Handle multi-head case
             if isinstance(self.outcome[index], dict):
-                # For multi-head, return the dictionary of targets
-                target = self.outcome[index]
+                # For multi-head, return the dictionary of targets with scaling if needed
+                target = {}
+                for k, v in self.outcome[index].items():
+                    # Apply regression scaling if this is a regression head
+                    if k in self.regression_value_scale and k in self.head_task and self.head_task[k] == 'regression':
+                        # Apply scaling (e.g., divide LVEF by 10)
+                        if v is not None:
+                            target[k] = float(v) * self.regression_value_scale[k]
+                        else:
+                            target[k] = v
+                    else:
+                        target[k] = v
+                        
                 if self.target_transform is not None:
                     target = {
                         k: self.target_transform(torch.tensor(v).float())
@@ -356,9 +454,17 @@ class Video(torch.utils.data.Dataset):
 
         # For SSL/MVM pretraining without labels
         if self.target_label is None:
-            return video, torch.tensor(0.0), video_fname  # Return dummy target
+            if self.use_cached_hog:
+                # Always return 4 elements when HOG caching is enabled
+                return video, torch.tensor(0.0), video_fname, cached_hog  # cached_hog might be None
+            else:
+                return video, torch.tensor(0.0), video_fname  # Return dummy target
         
-        return video, target, video_fname
+        if self.use_cached_hog:
+            # Always return 4 elements when HOG caching is enabled
+            return video, target, video_fname, cached_hog  # cached_hog might be None
+        else:
+            return video, target, video_fname
 
     def __len__(self):
         return len(self.fnames)
@@ -384,6 +490,7 @@ import torch
 import torch.utils.data
 import torchvision
 from torchvision.transforms import v2
+import cv2
 
 # Global variable for directory paths
 dir2 = os.path.abspath("/volume/Orion/orion")
@@ -398,6 +505,30 @@ def _defaultdict_of_lists():
     """Returns a defaultdict of lists.
     Used to avoid issues with Windows if anonymous."""
     return collections.defaultdict(list)
+
+
+def custom_collate_with_hog(batch):
+    """Custom collate function that handles cached HOG features which might be None."""
+    # Separate the elements based on batch size
+    if len(batch[0]) == 4:
+        # Has cached HOG
+        videos, targets, fnames, hog_features = zip(*batch)
+        
+        # Stack videos and targets normally
+        videos = torch.stack([torch.from_numpy(v) if isinstance(v, np.ndarray) else v for v in videos])
+        targets = torch.stack(targets)
+        
+        # Handle HOG features - if any are None, set all to None for this batch
+        if any(h is None for h in hog_features):
+            hog_features = None
+        else:
+            hog_features = torch.stack(hog_features)
+        
+        return videos, targets, list(fnames), hog_features
+    else:
+        # Standard collate for 3-element tuples
+        from torch.utils.data._utils.collate import default_collate
+        return default_collate(batch)
 
 
 def format_mean_std(input_value):
@@ -476,6 +607,9 @@ class Video_Multi(torch.utils.data.Dataset):
         debug=False,
         normalize=True,
         labels_map=None,
+        regression_value_scale=None,
+        head_task=None,
+        max_videos=None,
     ):
         super().__init__()
         self.root = pathlib.Path(root)
@@ -510,6 +644,11 @@ class Video_Multi(torch.utils.data.Dataset):
         #    }
         # }
         self.labels_map = labels_map or {}
+        
+        # Store regression scaling and task type info
+        self.regression_value_scale = regression_value_scale or {}
+        self.head_task = head_task or {}
+        self.max_videos = max_videos
 
         # --- Parse target_label -> self.target_label_list
         if isinstance(target_label, str):
@@ -521,8 +660,13 @@ class Video_Multi(torch.utils.data.Dataset):
         else:
             self.target_label_list = []
 
-        # Read CSV with "α" delimiter
-        df_dataset = pd.read_csv(self.root / self.filename, sep="α", engine="python")
+        # Read data file - support both CSV and Parquet formats
+        data_path = self.root / self.filename
+        if str(data_path).endswith('.parquet'):
+            df_dataset = pd.read_parquet(data_path)
+        else:
+            # Default to "α" separated CSV
+            df_dataset = pd.read_csv(data_path, sep="α", engine="python")
 
         # Build a dictionary of column indices for each label
         self.target_indices = {}
@@ -551,10 +695,17 @@ class Video_Multi(torch.utils.data.Dataset):
         self.outcome = []
 
         # Filter rows by split
+        row_count = 0
         for _, row in df_dataset.iterrows():
             file_mode = str(row.iloc[splitIndex]).lower()
             if split not in ["all", file_mode]:
                 continue
+            
+            # Apply max_videos limit if specified
+            if self.max_videos is not None and row_count >= self.max_videos:
+                print(f"[Video_Multi] Limiting dataset to {self.max_videos} videos")
+                break
+            row_count += 1
 
             # Gather the paths for each view
             view_files = []
@@ -673,7 +824,15 @@ class Video_Multi(torch.utils.data.Dataset):
             if lbl in self.labels_map and isinstance(raw_val, str):
                 target[lbl] = self.labels_map[lbl].get(raw_val, raw_val)
             else:
-                target[lbl] = raw_val
+                # Apply regression scaling if this is a regression head
+                if lbl in self.regression_value_scale and lbl in self.head_task and self.head_task[lbl] == 'regression':
+                    # Apply scaling (e.g., divide LVEF by 10)
+                    if raw_val is not None:
+                        target[lbl] = float(raw_val) * self.regression_value_scale[lbl]
+                    else:
+                        target[lbl] = raw_val
+                else:
+                    target[lbl] = raw_val
 
         return view_tensors, target, video_fnames
 

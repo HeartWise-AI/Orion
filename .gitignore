@@ -1,4 +1,5 @@
 # Ignore directories
+hog_features_cache/
 artifacts/
 .ipynb_checkpoints/
 __pycache__/
