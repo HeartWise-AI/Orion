@@ -32,3 +32,6 @@ test.py
 CathEF*
 swin3d_s*
 core*
+
+.venv/
+orion-venv/
