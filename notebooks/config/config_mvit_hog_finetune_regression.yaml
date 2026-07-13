@@ -4,7 +4,7 @@
 # Training parameters
 num_epochs: !!int 30
 model_name: !!str mvit_v2_s
-data_filename: !!str /media/data1/ravram/CathEF_Retrain/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha.csv
+data_filename: !!str /data/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha.csv
 output_dir: !!str "outputs_mvit_mvm_finetune_regression"
 root: !!str "."
 datapoint_loc_label: !!str FileName
@@ -17,7 +17,7 @@ resume: !!bool false  # Not resuming from a checkpoint, loading pretrained weigh
 
 # Load pretrained MVM checkpoint
 pretrained: !!bool false  # Don't load ImageNet weights since we're loading from checkpoint
-checkpoint_path: !!str "outputs_hog_mvm_pretrain_optimized/mvit_v2_s_24_16_2_AdamW_new_20250909-225222_tpxeuzg2/checkpoint_epoch_2.pt"
+checkpoint_path: !!str "/media/data1/models/DeepCoro_HOG_MVIT/mvit_v2_s_24_16_2_AdamW_new_20250915-154813_9rc217lv/best.pt"
 load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
 
 # Task configuration - default task type (can be overridden per head)
@@ -59,8 +59,12 @@ optimizer: !!str AdamW
 weight_decay: !!float 0.0003845182987994549  # Proven working value
 betas: [0.9, 0.999]
 num_workers: !!int 8
-batch_size: !!int 6  # Adjust based on GPU memory
+batch_size: !!int 24  # Adjust based on GPU memory
 lr: !!float 0.00002786988178725705  # Proven working learning rate
+backbone_lr: !!float 0.00002786988178725705
+head_lr_multiplier: !!float 10.0
+head_weight_decay: !!float 0.0
+head_param_keywords: [head]
 
 # Learning rate scheduler
 scheduler_type: !!str cosine_warm_restart  # Better scheduler from working config

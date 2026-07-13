@@ -770,152 +770,201 @@ def run_training_or_evaluate_orchestrator(
     
     y = np.array(targets) if targets else np.array([])
     yhat = np.array(predictions) if predictions else np.array([])
-
     learning_rate = optimizer.param_groups[0]["lr"] if scheduler is not None else config["lr"]
 
     final_metrics = ""
-    if task == "regression":
-        print("Epoch logging", epoch)
-        
-        # Check if using multi-head structure for regression
-        head_structure = config.get("head_structure")
+    head_structure = config.get("head_structure")
+    head_task = config.get("head_task", {})
+    is_multi_head = (
+        config.get("loss") == "multi_head"
+        and isinstance(head_structure, dict)
+        and len(head_structure) > 0
+    )
+
+    if is_multi_head:
+        if do_log and "main_loss" in average_losses:
+            wandb.log({f"{phase}_epoch_loss": average_losses["main_loss"]})
+
+        final_metrics = {}
+        mean_roc_auc_no_nan = 0.0
+        auc_count = 0
         regression_thresholds = config.get("regression_head_binary_thresholds", {})
-        
-        if head_structure and config.get("loss") == "multi_head":
-            # Multi-head regression
-            mean_roc_auc_no_nan = 0
-            auc_count = 0
-            all_head_metrics = {}  # Store metrics for all heads
-            
-            for head_name in head_structure.keys():
-                if head_name in targets and head_name in predictions:
-                    y_head = np.array(targets[head_name])
-                    yhat_head = np.array(predictions[head_name])
-                    
-                    # Flatten if needed
-                    if yhat_head.ndim == 2 and yhat_head.shape[1] == 1:
-                        yhat_head = yhat_head.ravel()
-                    if y_head.ndim == 2 and y_head.shape[1] == 1:
-                        y_head = y_head.ravel()
-                    
-                    # Compute regression metrics for this head
-                    head_metrics = {}
-                    if phase in metrics:
-                        head_metrics = metrics[phase].compute()
-                        metrics[phase].reset()
-                    else:
-                        # Compute metrics manually if not available
-                        import torch
-                        from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError
-                        mae_metric = MeanAbsoluteError()
-                        mse_metric = MeanSquaredError()
-                        mae_metric.update(torch.tensor(yhat_head), torch.tensor(y_head))
-                        mse_metric.update(torch.tensor(yhat_head), torch.tensor(y_head))
-                        head_metrics = {'mae': mae_metric.compute(), 'mse': mse_metric.compute()}
-                    
-                    # Store metrics for this head
-                    all_head_metrics[head_name] = head_metrics
-                    
-                    # If a binary threshold is defined for this head, compute AUC
-                    if head_name in regression_thresholds:
-                        threshold = regression_thresholds[head_name]
-                        # Binarize targets and predictions
-                        y_binary = (y_head < threshold).astype(int)  # 1 if below threshold (abnormal)
-                        
-                        # Compute AUC using predictions as scores
-                        # Invert predictions since lower values are "positive" class
-                        from sklearn.metrics import roc_auc_score
-                        try:
-                            auc_score = roc_auc_score(y_binary, -yhat_head)  # Negative because lower is positive
-                            mean_roc_auc_no_nan += auc_score
-                            auc_count += 1
-                            print(f"[Regression AUC] Head '{head_name}' - Threshold: {threshold}, AUC: {auc_score:.4f}")
-                            
-                            if do_log:
-                                wandb.log({
+
+        metrics_device = device if isinstance(device, torch.device) else torch.device(device)
+
+        for head_name, num_classes in head_structure.items():
+            if head_name not in targets or head_name not in predictions:
+                continue
+
+            y_head = np.array(targets[head_name])
+            yhat_head = np.array(predictions[head_name])
+
+            if yhat_head.ndim == 2 and yhat_head.shape[1] == 1:
+                yhat_head = yhat_head.ravel()
+            if y_head.ndim == 2 and y_head.shape[1] == 1:
+                y_head = y_head.ravel()
+
+            head_task_type = head_task.get(head_name)
+            if head_task_type is None:
+                if num_classes > 1 or task == "classification":
+                    head_task_type = "classification"
+                else:
+                    head_task_type = "regression"
+
+            if head_task_type == "regression":
+                from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+                mae = mean_absolute_error(y_head, yhat_head)
+                mse = mean_squared_error(y_head, yhat_head)
+                rmse = np.sqrt(mse)
+                head_metrics = {"mae": mae, "mse": mse, "rmse": rmse}
+
+                if do_log:
+                    wandb.log({
+                        f"{phase}_{head_name}_mae": mae,
+                        f"{phase}_{head_name}_mse": mse,
+                        f"{phase}_{head_name}_rmse": rmse,
+                        f"{phase}_{head_name}_loss": average_losses.get(
+                            head_name, average_losses.get("main_loss", 0)
+                        ),
+                    })
+                    if len(y_head) > 0 and len(yhat_head) > 0:
+                        plot_regression_graphics_and_log_binarized_to_wandb(
+                            y_head,
+                            yhat_head,
+                            f"{phase}_{head_name}",
+                            epoch,
+                            regression_thresholds.get(
+                                head_name, config.get("binary_threshold", 40.0)
+                            ),
+                            config,
+                        )
+
+                if phase == "val":
+                    best_metrics, mae_val, mse_val, rmse_val = update_best_regression_metrics(
+                        head_metrics, best_metrics
+                    )
+                    rmse_display = (
+                        rmse_val.item() if hasattr(rmse_val, "item") else rmse_val
+                    )
+                    mae_display = mae_val.item() if hasattr(mae_val, "item") else mae_val
+                    print(
+                        f"[Regression Metrics] Head '{head_name}' - MAE: {mae_display:.4f}, RMSE: {rmse_display:.4f}"
+                    )
+
+                if head_name in regression_thresholds:
+                    from sklearn.metrics import roc_auc_score
+
+                    threshold = regression_thresholds[head_name]
+                    y_binary = (y_head < threshold).astype(int)
+                    try:
+                        auc_score = roc_auc_score(y_binary, -yhat_head)
+                        mean_roc_auc_no_nan += auc_score
+                        auc_count += 1
+                        print(
+                            f"[Regression AUC] Head '{head_name}' - Threshold: {threshold}, AUC: {auc_score:.4f}"
+                        )
+                        if do_log:
+                            wandb.log(
+                                {
                                     f"{phase}_{head_name}_auc": auc_score,
                                     f"{phase}_{head_name}_threshold": threshold,
-                                })
-                        except Exception as e:
-                            print(f"[Warning] Could not compute AUC for head '{head_name}': {e}")
-                    
-                    # Log regression metrics
-                    if do_log:
-                        log_regression_metrics_to_wandb(
-                            f"{phase}_{head_name}", head_metrics, average_losses.get(head_name, average_losses["main_loss"]), learning_rate
-                        )
-                        # Make sure arrays are properly formatted before passing to plot function
-                        if len(y_head) > 0 and len(yhat_head) > 0:
-                            plot_regression_graphics_and_log_binarized_to_wandb(
-                                y_head, yhat_head, f"{phase}_{head_name}", epoch, 
-                                regression_thresholds.get(head_name, config.get("binary_threshold", 40.0)), 
-                                config
+                                }
                             )
-            
-            # Average AUC across heads if any were computed
-            if auc_count > 0:
-                mean_roc_auc_no_nan = mean_roc_auc_no_nan / auc_count
-            else:
-                mean_roc_auc_no_nan = 0
-                
-            # Update best metrics using the first head's metrics (or average across heads)
-            # For now, we'll use the first head's metrics for the overall best metrics
-            if all_head_metrics:
-                first_head = list(head_structure.keys())[0]
-                if first_head in all_head_metrics and all_head_metrics[first_head]:
-                    final_metrics = all_head_metrics[first_head]
-                    if 'mae' in final_metrics and 'mse' in final_metrics:
-                        best_metrics, mae, mse, rmse = update_best_regression_metrics(
-                            final_metrics, best_metrics
+                    except Exception as exc:
+                        print(
+                            f"[Warning] Could not compute AUC for head '{head_name}': {exc}"
                         )
-                        print(f"[Regression Metrics] Head '{first_head}' - MAE: {mae:.4f}, RMSE: {rmse:.4f}")
-            else:
-                # Fallback: compute metrics if not already done
-                first_head = list(head_structure.keys())[0]
-                if first_head in targets and first_head in predictions:
-                    y = np.array(targets[first_head])
-                    yhat = np.array(predictions[first_head])
-                    if yhat.ndim == 2 and yhat.shape[1] == 1:
-                        yhat = yhat.ravel()
-                    if y.ndim == 2 and y.shape[1] == 1:
-                        y = y.ravel()
-                    # Compute metrics manually
-                    import torch
-                    from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError
-                    mae_metric = MeanAbsoluteError()
-                    mse_metric = MeanSquaredError()
-                    mae_metric.update(torch.tensor(yhat), torch.tensor(y))
-                    mse_metric.update(torch.tensor(yhat), torch.tensor(y))
-                    final_metrics = {'mae': mae_metric.compute(), 'mse': mse_metric.compute()}
-                    best_metrics, mae, mse, rmse = update_best_regression_metrics(
-                        final_metrics, best_metrics
+
+            elif num_classes <= 2:
+                metrics_head = initialize_classification_metrics(num_classes or 1, metrics_device)
+                preds_tensor = torch.tensor(yhat_head, dtype=torch.float32, device=metrics_device)
+                targets_tensor = torch.tensor(y_head, dtype=torch.int64, device=metrics_device)
+                update_classification_metrics(
+                    metrics_head,
+                    preds_tensor,
+                    targets_tensor,
+                    num_classes or 1,
+                )
+                head_metrics = compute_classification_metrics(metrics_head)
+                optimal_thresh = compute_optimal_threshold(y_head, yhat_head)
+                pred_labels = (yhat_head > optimal_thresh).astype(int)
+
+                if do_log:
+                    log_binary_classification_metrics_to_wandb(
+                        phase=f"{phase}_{head_name}",
+                        loss=average_losses.get(head_name, average_losses.get("main_loss", 0)),
+                        auc_score=head_metrics.get("auc", 0.0),
+                        optimal_threshold=optimal_thresh,
+                        y_true=y_head,
+                        pred_labels=pred_labels,
+                        label_map=labels_map.get(head_name) if labels_map else None,
+                        learning_rate=learning_rate,
                     )
-                    print(f"[Regression Metrics Fallback] Head '{first_head}' - MAE: {mae:.4f}, RMSE: {rmse:.4f}")
+
+                mean_roc_auc_no_nan += head_metrics.get("auc", 0.0)
+                auc_count += 1
+
+            else:
+                metrics_head = initialize_classification_metrics(num_classes, metrics_device)
+                preds_tensor = torch.tensor(yhat_head, dtype=torch.float32, device=metrics_device)
+                targets_tensor = torch.tensor(y_head, dtype=torch.int64, device=metrics_device)
+                update_classification_metrics(
+                    metrics_head,
+                    preds_tensor,
+                    targets_tensor,
+                    num_classes,
+                )
+                head_metrics = compute_multiclass_metrics(metrics_head)
+
+                if do_log:
+                    log_multiclass_metrics_to_wandb(
+                        phase=phase,
+                        epoch=epoch,
+                        metrics_summary=head_metrics,
+                        labels_map=labels_map.get(head_name) if labels_map else None,
+                        head_name=head_name,
+                        loss=average_losses.get(head_name, average_losses.get("main_loss", 0)),
+                        y_true=y_head,
+                        predictions=yhat_head,
+                        learning_rate=learning_rate,
+                    )
+
+                mean_roc_auc_no_nan += head_metrics.get("auc_weighted", 0.0)
+                auc_count += 1
+
+            final_metrics[head_name] = head_metrics
+
+        if auc_count > 0:
+            mean_roc_auc_no_nan /= auc_count
         else:
-            # Single-head regression (original logic)
-            # Flatten yhat to 1D if it's 2D
-            if yhat.ndim == 3:
-                yhat = yhat.reshape(yhat.shape[0], yhat.shape[2])  ## Converts it to 2D Array
+            mean_roc_auc_no_nan = 0
 
-            if yhat.ndim == 2 and yhat.shape[1] == 1:
-                yhat = yhat.ravel()  # This converts it to a 1D array
+    elif task == "regression":
+        print("Epoch logging", epoch)
 
-            final_metrics = metrics[phase].compute()
-            metrics[phase].reset()
-            auc_score = 0  # Temporary placeholder
-            mean_roc_auc_no_nan = 0  # Temporary placeholder
+        # Single-head regression (original logic)
+        if yhat.ndim == 3:
+            yhat = yhat.reshape(yhat.shape[0], yhat.shape[2])  ## Converts it to 2D Array
 
-            if do_log:
-                log_regression_metrics_to_wandb(
-                    phase, final_metrics, average_losses["main_loss"], learning_rate
-                )
-                plot_regression_graphics_and_log_binarized_to_wandb(
-                    y, yhat, phase, epoch, config["binary_threshold"], config
-                )
+        if yhat.ndim == 2 and yhat.shape[1] == 1:
+            yhat = yhat.ravel()  # This converts it to a 1D array
 
-                best_metrics, mae, mse, rmse = update_best_regression_metrics(
-                    final_metrics, best_metrics
-                )
+        final_metrics = metrics[phase].compute()
+        metrics[phase].reset()
+        mean_roc_auc_no_nan = 0  # Temporary placeholder
+
+        if do_log:
+            log_regression_metrics_to_wandb(
+                phase, final_metrics, average_losses["main_loss"], learning_rate
+            )
+            plot_regression_graphics_and_log_binarized_to_wandb(
+                y, yhat, phase, epoch, config["binary_threshold"], config
+            )
+
+            best_metrics, mae, mse, rmse = update_best_regression_metrics(
+                final_metrics, best_metrics
+            )
 
     elif task == "classification":
         # Log the aggregated loss
@@ -979,6 +1028,8 @@ def run_training_or_evaluate_orchestrator(
                     )
                 mean_roc_auc_no_nan += head_metrics["auc"]
                 auc_count += 1
+                for metric in metrics[phase][head_name].values():
+                    metric.reset()
             else:
                 # Multi-class classification for this head
                 head_metrics = compute_multiclass_metrics(metrics[phase][head_name])
@@ -996,6 +1047,8 @@ def run_training_or_evaluate_orchestrator(
                     )
                 mean_roc_auc_no_nan += head_metrics["auc_weighted"]
                 auc_count += 1
+                for metric in metrics[phase][head_name].values():
+                    metric.reset()
 
             final_metrics[head_name] = head_metrics
 

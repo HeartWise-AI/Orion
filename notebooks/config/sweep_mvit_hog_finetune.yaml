@@ -1,0 +1,145 @@
+# Sweep configuration for MViT HOG fine-tuning with regression + classification
+# This sweep tests both regression and classification heads for LVEF prediction
+
+program: orion/utils/video_training_and_eval.py
+method: bayes  # Bayesian optimization
+metric:
+  name: val/mean_auc  # Optimize for mean AUC across all heads
+  goal: maximize
+
+parameters:
+  # Fixed base configuration
+  config_path:
+    value: notebooks/config/config_mvit_hog_finetune_regression.yaml
+
+  # Model and data parameters (fixed)
+  model_name:
+    value: mvit_v2_s
+  data_filename:
+    value: /media/data1/ravram/CathEF_Retrain/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha.csv
+  checkpoint_path:
+    value: /media/data1/models/DeepCoro_HOG_MVIT/mvit_v2_s_24_16_2_AdamW_new_20250915-154813_9rc217lv/best.pt
+  load_mvm_encoder_only:
+    value: true
+
+  # Training parameters to sweep
+  batch_size:
+    value: 16  # Fixed for multi-GPU training (will be split across GPUs)
+
+  lr:
+    distribution: log_uniform_values
+    min: 0.000001
+    max: 0.0001
+
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
+
+  # Optimizer selection
+  optimizer:
+    values: ["AdamW", "Adam"]
+
+  # Loss functions for regression
+  loss_structure:
+    value:
+      Value: l1  # L1 loss for LVEF regression
+
+  # Scheduler parameters
+  scheduler_type:
+    values: ["cosine", "cosine_warm_restart", "step"]
+
+  warmup_epochs:
+    values: [3, 5, 7]
+
+  # Regularization
+  dropout_rate:
+    distribution: uniform
+    min: 0.1
+    max: 0.5
+
+  # Gradient clipping
+  gradient_clip_val:
+    values: [0.5, 1.0, 2.0]
+
+  # Gradient accumulation
+  gradient_accumulation_steps:
+    values: [1, 2]  # Reduced since we have larger batch size
+
+  # Layer freezing schedule
+  video_freeze_start:
+    distribution: uniform
+    min: 0.5
+    max: 0.9
+
+  video_freeze_warmup_epochs:
+    values: [5, 10, 15]
+
+  # Data augmentation parameters
+  rotation_degrees:
+    values: [5, 10, 15]
+
+  brightness:
+    distribution: uniform
+    min: 0.05
+    max: 0.2
+
+  contrast:
+    distribution: uniform
+    min: 0.05
+    max: 0.2
+
+  # Mixed precision
+  use_amp:
+    value: true
+
+  # Training epochs
+  num_epochs:
+    value: 30
+
+  # Early stopping
+  early_stopping_patience:
+    values: [7, 10, 15]
+
+  # Binary threshold for classification metrics
+  regression_head_binary_thresholds:
+    value:
+      Value: 40.0  # Standard LVEF threshold
+
+  # RoPE configuration
+  use_rope:
+    value: true
+  rope_base:
+    values: [10000.0, 20000.0]
+
+  # Fixed parameters
+  frames:
+    value: 16
+  resize:
+    value: 224
+  period:
+    value: 2
+  num_workers:
+    value: 8
+  # distributed flag will be set automatically based on environment
+  # distributed:
+  #   value: false
+  device:
+    value: cuda
+  seed:
+    value: 42
+
+  # Logging
+  project:
+    value: orion-mvit-hog-finetune-sweep
+  entity:
+    value: mhi_ai
+  tag:
+    value: mvit_hog_regression_classification_sweep
+
+# Sweep configuration
+early_terminate:
+  type: hyperband
+  s: 2
+  eta: 3
+  max_iter: 30

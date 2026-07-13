@@ -1,0 +1,164 @@
+# MViT v2 S Fine-tuning for LVEF Classification after HOG/MVM Pretraining
+# Fine-tune the pretrained encoder for binary LVEF classification (< 40% vs ≥ 40%)
+
+# Training parameters
+num_epochs: !!int 30
+model_name: !!str mvit_v2_s
+data_filename: !!str /media/data1/ravram/CathEF_Retrain/CathEF_MHI_UCSF_2016-to-july-2022-and-2023-08-30-post-CathEF_alpha.csv
+output_dir: !!str "outputs_mvit_mvm_finetune_classification"
+root: !!str "."
+datapoint_loc_label: !!str FileName
+label_loc_label: [y_true_cat]  # Match dataset column for classification
+target_label: !!str y_true_cat
+binary_threshold: !!float 0.5  # Probability threshold for binary classification
+device: !!str cuda
+seed: !!int 42
+resume: !!bool false  # Not resuming from a checkpoint, loading pretrained weights instead
+
+# Load pretrained MVM checkpoint
+pretrained: !!bool false  # Don't load ImageNet weights since we're loading from checkpoint
+checkpoint_path: !!str "/media/data1/models/DeepCoro_HOG_MVIT/mvit_v2_s_24_16_2_AdamW_new_20250915-154813_9rc217lv/best.pt"
+load_mvm_encoder_only: !!bool true  # Only load encoder weights, not MVM decoder
+
+# Task configuration - default task type (can be overridden per head)
+task: !!str classification
+loss: !!str multi_head  # Multi-head framework (single head here)
+num_classes: !!int 1  # Single output for classification
+
+# Head structure configuration (single classification head)
+head_structure:
+  y_true_cat: !!int 1  # Single classification output
+
+# Head task configuration (specify task type for each head)
+head_task:
+  y_true_cat: !!str classification  # This head is for classification
+
+# Loss structure configuration
+loss_structure:
+  y_true_cat: !!str bce_logit  # BCE loss is more stable for LVEF classification
+
+# Head weights configuration
+head_weights:
+  y_true_cat: !!float 1.0
+
+# classification head binary thresholds for AUC calculation
+# Used to binarize continuous predictions for computing classification metrics
+classification_head_binary_thresholds:
+  Value: !!float 40.0  # Threshold for LVEF (< 40% is reduced ejection fraction)
+
+# MViT specific parameters
+frames: !!int 16  # MViT requires 16 frames
+resize: !!int 224  # Standard input size
+period: !!int 2
+view_count: !!int 1
+mean: [99.63698, 99.63698, 99.63698]  # Computed from DeepCoro dataset
+std: [51.81118, 51.81118, 51.81118]  # Computed from DeepCoro dataset
+
+# Optimizer configuration for fine-tuning
+optimizer: !!str AdamW
+weight_decay: !!float 0.0003845182987994549  # Proven working value
+betas: [0.9, 0.999]
+num_workers: !!int 8
+batch_size: !!int 24  # Adjust based on GPU memory
+lr: !!float 0.00001  # Lowered to stabilize full-backbone finetuning
+backbone_lr: !!float 0.000005  # Gentle updates for pretrained encoder
+head_lr_multiplier: !!float 5.0  # Reduced to temper head updates
+head_weight_decay: !!float 0.0
+head_param_keywords: [head]
+
+# Learning rate scheduler
+scheduler_type: !!str cosine  # Better scheduler from working config
+warmup_epochs: !!int 5  # Longer warmup after removing freeze schedule
+min_lr: !!float 0.000001
+
+# Layer-wise learning rate decay for better fine-tuning
+
+# No video freezing—stability comes from lower LR + longer warmup
+
+# 3D RoPE Configuration (enabled for MViT)
+use_rope: !!bool true
+rope_base: !!float 10000.0
+rope_temporal_scale: !!float 1.0
+rope_normalize_mode: !!str separate
+
+# Mixed precision and gradient accumulation
+use_amp: !!bool true
+gradient_accumulation_steps: !!int 4
+gradient_clip_val: !!float 1.0
+
+# Data augmentation (lighter for fine-tuning)
+rand_augment: !!bool false
+rotation_degrees: !!int 10
+brightness: !!float 0.1
+contrast: !!float 0.1
+saturation: !!float 0.1
+hue: !!float 0.05
+
+# Additional augmentation parameters
+random_erase_prob: !!float 0.0
+mixup_alpha: !!float 0.0  # No mixup for classification
+cutmix_alpha: !!float 0.0  # No cutmix for classification
+
+# Validation parameters
+val_split: !!float 0.2
+eval_every_n_epochs: !!int 1
+save_best_model: !!bool true
+save_best: !!str loss  # Save based on validation loss
+early_stopping_patience: !!int 10
+
+# Logging
+project: !!str "orion-mvit-mvm-finetune-lvef"
+entity: !!str "mhi_ai"
+tag: !!str "mvit_mvm_finetune_lvef_classification"
+log_interval: !!int 20
+save_checkpoint_every_n_epochs: !!int 5
+
+# Evaluation metrics for classification
+metrics_control:
+  optim_thresh: !!str g_mean  # Binary metric for dichotomizing at threshold (g_mean = geometric mean of sensitivity and specificity)
+  plot_pred_distribution: !!bool true  # Enable to analyze binarized predictions at threshold
+  plot_metrics_moving_thresh: !!bool false  # Set to true if you want to see threshold optimization plots
+  n_bootstrap: !!int 100
+  q_bootstrap: !!float 0.05
+
+# Model saving
+save_strategy: !!str best
+keep_last_n_checkpoints: !!int 3
+
+# Distributed training
+distributed: !!bool false
+backend: !!str nccl
+find_unused_parameters: !!bool true  # Needed for RoPE
+
+# Memory optimization
+pin_memory: !!bool true
+persistent_workers: !!bool true
+prefetch_factor: !!int 2
+
+# Test configuration
+run_test: !!bool false
+test_time_augmentation: !!bool false
+apply_mask: !!bool false
+weighted_sampling: !!bool false
+debug: !!bool false
+
+# Transforms (if needed)
+transforms: !!null null
+
+# No label smoothing for classification
+label_smoothing: !!null null
+label_smoothing_value: !!null null
+class_weights: !!null null
+
+# No label mappings needed for classification
+
+labels_map:
+  y_true_cat:
+    "low": !!int 1
+    "normal": !!int 0
+
+# Frame sampling strategy
+frame_sampling:
+  strategy: !!str uniform
+  clip_duration: !!float 2.0
+  clips_per_video: !!int 1
