@@ -47,3 +47,9 @@ test.py
 CathEF*
 swin3d_s*
 core*
+
+# Stray npm install artefacts
+notebooks/config/node_modules/
+notebooks/config/package.json
+notebooks/config/package-lock.json
+node_modules/
